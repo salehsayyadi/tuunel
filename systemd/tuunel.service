@@ -1,0 +1,20 @@
+[Unit]
+Description=tuunel Layer-3 tunnel (MVP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tuunel server -listen :9443 -peer-name node-a.example -tun tun0 -mtu 1300 -cert /etc/tuunel/node.crt -key /etc/tuunel/node.key -ca /etc/tuunel/ca.crt
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/tuunel
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
