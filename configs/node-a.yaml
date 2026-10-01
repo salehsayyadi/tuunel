@@ -1,0 +1,75 @@
+# Node A: edge/client side. Initiates the tunnel to node B.
+# Replace every REPLACE_ME value. Nothing here is a real key or address.
+node:
+  id: node-a
+
+interface:
+  name: tun0
+  addresses: ["10.200.0.1/30"]   # add e.g. "fd20::1/64" for IPv6 inside the tunnel
+  mtu: auto                      # or an integer, e.g. 1380
+  min_mtu: 1280                  # lower bound for auto mode
+  # path_mtu: 1500               # override detection of the underlay path MTU
+  # routes: ["192.168.50.0/24"]  # extra prefixes routed into the tunnel
+
+security:
+  private_key_file: /etc/tuunel/node.key
+  # preshared_key_file: /etc/tuunel/psk     # optional, `tuunel genpsk`
+  rekey_interval: 10m
+  handshake_timeout: 5s
+
+peers:
+  - name: node-b
+    public_key: "REPLACE_ME_WITH_NODE_B_PUBLIC_KEY"
+    allowed_ips: ["10.200.0.2/32"]
+    endpoints:                     # tried by priority (or latency, see failover)
+      - {name: germany,     address: 203.0.113.10}
+      - {name: netherlands, address: 203.0.113.20}
+      - {name: finland,     address: 203.0.113.30}
+    carriers:                      # order = preference on each endpoint
+      - {type: tcp,  port: 443}
+      - {type: quic, port: 443}
+      - {type: wss,  port: 8443, path: /tuunel}
+      - {type: udp,  port: 51900}
+      - {type: icmp, enabled: false}   # needs experimental.icmp and CAP_NET_RAW
+
+health:
+  interval: 2s
+  ping_timeout: 2s
+  window: 20
+  degraded_loss_pct: 5
+  failed_loss_pct: 50
+  failed_after_missed: 4
+  # degraded_rtt: 300ms
+  # degraded_jitter: 50ms
+  clear_ratio: 0.5           # hysteresis: recover when metrics < threshold*ratio
+  idle_timeout: 30s
+
+failover:
+  enabled: true
+  order: endpoint            # endpoint: all carriers of best endpoint first; carrier: best carrier on any endpoint
+  endpoint_selection: priority   # or latency
+  backoff_initial: 1s
+  backoff_max: 1m
+  max_retries: 0             # >0: park a candidate for `cooldown` after N consecutive failures
+  cooldown: 5m
+  min_hold: 30s              # anti-flapping: minimum time on a link before voluntary switch
+  probe_interval: 10s
+  recovery_successes: 3
+  preempt: true              # return to a better candidate once it is stable
+  switch_on_degraded: true
+
+forwarding:
+  tcp: []
+  udp: []
+
+api:
+  socket: /run/tuunel/tuunel.sock
+  # listen: 127.0.0.1:9900
+  # token_file: /etc/tuunel/api.token   # required for non-loopback listen
+
+experimental:
+  icmp: false
+
+log:
+  level: info
+  format: text

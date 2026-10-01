@@ -1,0 +1,32 @@
+# Node B: remote/exit side. Accepts node A on every enabled carrier.
+node:
+  id: node-b
+
+interface:
+  name: tun0
+  addresses: ["10.200.0.2/30"]
+  mtu: auto
+
+security:
+  private_key_file: /etc/tuunel/node.key
+
+listen:
+  - {carrier: tcp,  address: "0.0.0.0:443"}
+  - {carrier: quic, address: "0.0.0.0:443"}
+  - {carrier: wss,  address: "0.0.0.0:8443", path: /tuunel}
+    # optional real certificate for WSS/QUIC outer TLS:
+    # tls_cert_file: /etc/tuunel/tls.crt
+    # tls_key_file: /etc/tuunel/tls.key
+  - {carrier: udp,  address: "0.0.0.0:51900"}
+  # - {carrier: icmp, address: "0.0.0.0"}   # experimental.icmp: true required
+
+peers:
+  - name: node-a
+    public_key: "REPLACE_ME_WITH_NODE_A_PUBLIC_KEY"
+    allowed_ips: ["10.200.0.1/32"]
+
+api:
+  socket: /run/tuunel/tuunel.sock
+
+log:
+  level: info

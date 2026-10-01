@@ -1,0 +1,12 @@
+# Reverse tunnel, REMOTE side (may be behind NAT, accepts no inbound connections).
+node: {id: remote-1}
+interface: {name: tun0, addresses: ["10.200.0.2/24"], mtu: auto}
+security: {private_key_file: /etc/tuunel/node.key}
+peers:
+  - name: edge-01
+    public_key: "REPLACE_ME_EDGE"
+    allowed_ips: ["10.200.0.1/32"]
+    endpoints: [{name: edge, address: edge.example.net}]
+    carriers:
+      - {type: tcp, port: 443}
+      - {type: wss, port: 8443}

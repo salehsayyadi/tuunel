@@ -1,3 +1,4 @@
+// Command tuunel is the tunnel daemon.
 package main
 
 import (
@@ -9,6 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/salehsayyadi/tuunel/internal/config"
+	"github.com/salehsayyadi/tuunel/internal/daemon"
+	"github.com/salehsayyadi/tuunel/internal/mtu"
 	"github.com/salehsayyadi/tuunel/internal/tun"
 	"github.com/salehsayyadi/tuunel/internal/tunnel"
 )
@@ -18,10 +22,97 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	mode := os.Args[1]
+	switch os.Args[1] {
+	case "run":
+		fs := flag.NewFlagSet("run", flag.ExitOnError)
+		cfg := fs.String("config", "/etc/tuunel/config.yaml", "configuration file")
+		_ = fs.Parse(os.Args[2:])
+		if err := daemon.Run(*cfg); err != nil {
+			fatal(err.Error())
+		}
+	case "check":
+		fs := flag.NewFlagSet("check", flag.ExitOnError)
+		cfgPath := fs.String("config", "/etc/tuunel/config.yaml", "configuration file")
+		_ = fs.Parse(os.Args[2:])
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if _, warn, err := daemon.LoadPrivateKey(cfg.Security.PrivateKeyFile); err != nil {
+			fatal(err.Error())
+		} else if warn != "" {
+			fmt.Println("WARN:", warn)
+		}
+		plan, err := daemon.BuildPlan(cfg, mtu.DetectPathMTU)
+		if err != nil {
+			fatal(err.Error())
+		}
+		for _, w := range plan.MTU.Warnings {
+			fmt.Println("WARN: mtu:", w)
+		}
+		for _, e := range plan.Routes.Errors {
+			fmt.Println("ERROR: routing:", e)
+		}
+		if len(plan.Routes.Errors) > 0 {
+			os.Exit(1)
+		}
+		fmt.Printf("configuration OK: node=%s mtu=%d (%s) peers=%d listeners=%d\n", cfg.Node.ID, plan.MTU.TunMTU, plan.MTU.Mode, len(cfg.Peers), len(cfg.Listen))
+	case "genkey":
+		priv, pub, err := daemon.GenKey()
+		if err != nil {
+			fatal(err.Error())
+		}
+		fmt.Println(priv)
+		fmt.Fprintln(os.Stderr, "public key:", pub)
+	case "pubkey":
+		fs := flag.NewFlagSet("pubkey", flag.ExitOnError)
+		path := fs.String("key", "/etc/tuunel/node.key", "private key file")
+		_ = fs.Parse(os.Args[2:])
+		k, _, err := daemon.LoadPrivateKey(*path)
+		if err != nil {
+			fatal(err.Error())
+		}
+		fmt.Println(b64(k.Public))
+	case "genpsk":
+		k, err := daemon.GenPSK()
+		if err != nil {
+			fatal(err.Error())
+		}
+		fmt.Println(k)
+	case "version":
+		fmt.Println(daemon.Version)
+	case "server", "client":
+		legacy(os.Args[1])
+	default:
+		usage()
+		os.Exit(2)
+	}
+}
+
+func usage() {
+	fmt.Fprint(os.Stderr, `Usage: tuunel <command> [flags]
+
+Commands:
+  run     -config FILE   run the tunnel daemon
+  check   -config FILE   validate configuration, keys, MTU and routing plan
+  genkey                 print a new private key (public key on stderr)
+  pubkey  -key FILE      print the public key for a private key file
+  genpsk                 print a new optional pre-shared key
+  version                print version
+  server|client          legacy MVP mode: single TUN over TCP+TLS (see README)
+`)
+}
+
+func fatal(msg string) {
+	slog.Error(msg)
+	os.Exit(1)
+}
+
+// legacy keeps the original MVP (TUN over TCP with TLS 1.3 mutual auth).
+func legacy(mode string) {
 	fs := flag.NewFlagSet(mode, flag.ExitOnError)
 	iface := fs.String("tun", "tun0", "Linux TUN interface (created if absent)")
-	mtu := fs.Int("mtu", 1300, "maximum inner IP packet size (576..65535)")
+	mtuV := fs.Int("mtu", 1300, "maximum inner IP packet size (576..65535)")
 	listen := fs.String("listen", ":9443", "TCP listen address (server)")
 	endpoint := fs.String("endpoint", "", "remote host:port (client)")
 	cert := fs.String("cert", "", "node certificate PEM")
@@ -30,11 +121,7 @@ func main() {
 	serverName := fs.String("server-name", "", "expected server DNS name (client)")
 	peerName := fs.String("peer-name", "", "expected client certificate DNS name (server)")
 	_ = fs.Parse(os.Args[2:])
-	if mode != "server" && mode != "client" {
-		usage()
-		os.Exit(2)
-	}
-	if *mtu < 576 || *mtu > 65535 {
+	if *mtuV < 576 || *mtuV > 65535 {
 		fatal("MTU must be between 576 and 65535")
 	}
 	if *cert == "" || *key == "" || *ca == "" {
@@ -62,24 +149,13 @@ func main() {
 	defer device.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	cfg := tunnel.Config{Tun: device, MTU: *mtu}
+	cfg := tunnel.Config{Tun: device, MTU: *mtuV}
 	if isServer {
-		slog.Info("listening", "address", *listen, "tun", *iface, "mtu", *mtu)
 		err = tunnel.RunServer(ctx, *listen, tlsConfig, cfg)
 	} else {
-		slog.Info("connecting", "endpoint", *endpoint, "tun", *iface, "mtu", *mtu)
 		err = tunnel.RunClient(ctx, *endpoint, tlsConfig, cfg)
 	}
 	if err != nil {
 		fatal(err.Error())
 	}
-}
-
-func usage() {
-	fmt.Fprintln(os.Stderr, "Usage: tuunel {server|client} [flags]\nSee README.md for certificate and TUN setup.")
-}
-
-func fatal(msg string) {
-	slog.Error(msg)
-	os.Exit(1)
 }
