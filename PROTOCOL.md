@@ -17,7 +17,9 @@ WebSocket binary frames over TCP) prefix each message with a 2-byte length.
 - The responder authorizes the initiator's static key against configured peers
   before replying. It rejects initiations whose timestamp is more than 60 s older
   than the newest accepted one for that key, or that were already seen
-  (replayed initiation).
+  (replayed initiation). Consequence: if an initiator's clock steps back by
+  more than 60 s, the responder rejects its initiations until the responder
+  restarts. Keep clocks synchronized (NTP).
 - Datagram carriers retransmit `HandshakeInit` until a response or
   `handshake_timeout`.
 
@@ -28,7 +30,9 @@ WebSocket binary frames over TCP) prefix each message with a 2-byte length.
 ```
 
 - Nonce = counter; the 13-byte header is the AEAD associated data.
-- Receivers drop counters outside a 2048-message sliding window or already seen.
+- Receivers drop counters outside a 2048-message sliding window or already seen
+  (RFC 6479 bitmap; 1984 positions are guaranteed usable behind the highest
+  counter).
 - Rekey after 2^48 messages or `rekey_interval`; keys are rejected after 2^60.
 - Per-packet overhead: 13 + 1 + 16 = **30 bytes** plus carrier overhead
   (tcp 34, udp 8, quic stream 52, quic datagram 36, ws/wss 70, icmp 12, bytes,
@@ -49,7 +53,16 @@ Echo request/reply with identifier per link; payload starts with magic
 `TUNQ` (client→server) or `TUNR` (server→client) followed by the session
 message. Max message 1400 bytes. Requires `CAP_NET_RAW` and
 `experimental.icmp: true`, and usually `net.ipv4.icmp_echo_ignore_all=1` on the
-server so the kernel does not answer the same requests.
+server so the kernel does not answer the same requests. That sysctl also
+stops the host from answering ordinary pings, including pings to its tunnel
+address.
+
+## Compatibility
+
+The audit changed no wire format. The dependency upgrades (quic-go v0.63,
+x/net v0.59) keep QUIC v1/RFC 9221 DATAGRAM and RFC 6455 WebSocket framing.
+Interoperability between builds from before and after the audit was not
+tested, so upgrade both nodes together.
 
 ## Versioning
 

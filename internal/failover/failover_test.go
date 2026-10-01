@@ -151,3 +151,16 @@ func TestEligible(t *testing.T) {
 		t.Fatalf("%d %s", len(rest), rest[0].Key())
 	}
 }
+
+func TestSwitchesCountFailureDrivenSwitch(t *testing.T) {
+	cs := cands()
+	m := New(DefaultPolicy(), cs)
+	now := time.Now()
+	m.Connected(cs[0], now, 0)
+	m.Failure(cs[0], now, errX)
+	m.Connected(cs[1], now, 0)
+	m.Connected(cs[1], now, 0)
+	if got := m.Snapshot().Switches; got != 1 {
+		t.Fatalf("switches = %d, want 1", got)
+	}
+}

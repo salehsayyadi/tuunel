@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -260,5 +261,13 @@ func Prometheus(st engine.Status) string {
 	w("tuunel_reconnects_total", "Link re-establishments.", "counter", rc...)
 	w("tuunel_tunnel_uptime_seconds", "Current link uptime.", "gauge", upt...)
 	w("tuunel_dropped_packets_total", "Dropped packets by reason.", "counter", drops...)
+	// Process gauges used by the long-run resource test to detect leaks.
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	w("tuunel_goroutines", "Number of goroutines in the daemon.", "gauge", fmt.Sprintf("tuunel_goroutines %d", runtime.NumGoroutine()))
+	w("tuunel_heap_inuse_bytes", "Go heap bytes in use.", "gauge", fmt.Sprintf("tuunel_heap_inuse_bytes %d", ms.HeapInuse))
+	if ents, err := os.ReadDir("/proc/self/fd"); err == nil {
+		w("tuunel_open_fds", "Open file descriptors.", "gauge", fmt.Sprintf("tuunel_open_fds %d", len(ents)))
+	}
 	return b.String()
 }

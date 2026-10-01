@@ -28,11 +28,36 @@
 
 ## Audit performed (this repository)
 
-- `gofmt -l .` – clean
-- `go vet ./...` – clean
-- `staticcheck ./...` (2024.1.1) – clean (unused code removed)
-- `go test ./...` and `go test -race ./...` – pass, no races
-- Fuzz targets: session open/handshake parsing, packet validation
+Final internal production-readiness audit: see [FINAL_AUDIT.md](FINAL_AUDIT.md).
+
+- `gofmt -l .` – clean; `go vet ./...` – clean
+- `staticcheck ./...` (built with Go 1.27.1) – clean
+- `go test ./...` and `go test -race ./...` (Go 1.27.1) – pass, no races
+- `gosec ./...` – reviewed. Findings are integer-conversion warnings (G115) on
+  bounded values, unchecked `Close` errors (G104), config-path file reads
+  (G304), `math/rand` for backoff jitter (G404, not security-relevant) and
+  `unsafe` for the TUN ioctl (G103). No exploitable issue was found.
+- `govulncheck ./...` – **0 vulnerabilities reachable** after upgrading:
+  - Go toolchain 1.25.1 → **1.27.1** (stdlib CVEs in net/http, crypto/tls,
+    encoding/*). `go.mod` now requires `go 1.26.0`.
+  - `golang.org/x/net` v0.30.0 → **v0.59.0**.
+  - `github.com/quic-go/quic-go` v0.48.2 → **v0.63.0**. GO-2025-4017 was a
+    remotely triggerable panic, reachable through `quic.DialAddr` and
+    `quic.ListenAddr`.
+  - Remaining module-level notice GO-2026-5932 (`x/crypto/openpgp` is
+    deprecated) does not apply: tuunel never imports that package.
+- Fuzz targets: session open/handshake parsing, packet validation.
+
+### Security-relevant bugs fixed in the audit
+
+| Bug | Impact | Fix |
+|---|---|---|
+| Carrier reader goroutine (`pump`) blocked forever on a full channel after a rejected handshake or a closed link | **unauthenticated memory/goroutine leak** (remote DoS) | `pump.stop()` closes the connection and a `done` channel; it is used on every error path; regression test `TestPumpStopReleasesReaderWhenChannelFull` |
+| TUN fd registered with the Go poller before `TUNSETIFF` (`read /dev/net/tun: not pollable`) | daemon exited at start (availability) | open with `syscall.Open`, ioctl, set non-blocking, then `os.NewFile` |
+| quic-go GO-2025-4017 | remote panic of the daemon | dependency upgrade |
+
+Functional bugs found by the lab (MTU handling, failover metrics) and their
+fixes are listed in FINAL_AUDIT.md.
 
 This is a self-review, **not** an independent third-party audit.
 
@@ -55,6 +80,17 @@ well. Do not rely on outer TLS alone.
   forwarding rules only).
 - The legacy `server|client` MVP uses TLS mTLS and has not received the same
   review.
+- Handshake replay protection uses a 60 s timestamp window. As with
+  WireGuard, if a peer's clock steps back by more than the window, its
+  handshakes are rejected until the responder restarts. Keep NTP running.
+- The ICMP carrier requires `net.ipv4.icmp_echo_ignore_all=1` on the listener,
+  which also stops the host from answering normal pings.
+- Outer TLS on QUIC/WSS is not verified by default (see above). An on-path
+  attacker can terminate it but cannot read or forge tunnel traffic.
+- The systemd hardening (`ProtectSystem=strict`, capability bounding,
+  `MemoryDenyWriteExecute`, …) was not executed under systemd in the audit.
+  Running non-root with only `CAP_NET_ADMIN`/`CAP_NET_RAW`/
+  `CAP_NET_BIND_SERVICE` was tested.
 
 ## Reporting
 

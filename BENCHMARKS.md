@@ -1,24 +1,64 @@
 # Benchmarks
 
-All numbers were measured in the development VM (shared cloud vCPUs, Linux,
-Go 1.23.4). They are reproducible with the commands shown but **will differ**
-on other hardware and are not Internet-path numbers. Two network namespaces
-connected by a veth pair, underlay MTU 1500, no injected loss/latency.
+All numbers come from the audit VM: 2 shared cloud vCPUs, 4 GB, Linux 6.18,
+final build with Go 1.27.1. Two network namespaces are joined by a veth pair
+(underlay MTU 1500) with no injected loss or latency. They are **not
+Internet-path numbers**, and run-to-run variation on this shared VM was large
+(up to ±30 %).
 
-## End-to-end through tun0 (`sudo tests/lab/netns-bench.sh bin 50`)
+## End-to-end through tun0 (`sudo tests/lab/netns-bench.sh bin 100`)
 
-50 MiB inner TCP transfer through the tunnel, in-tunnel RTT via ping,
-daemon CPU time (user+sys) and RSS on both nodes.
+100 MiB inner TCP stream per carrier, measuring in-tunnel RTT (ping) and
+daemon CPU (user+sys) and RSS on both nodes.
 
-| Carrier | Goodput | In-tunnel RTT | CPU A / B (s) | RSS A / B |
-|---|---|---|---|---|
-| tcp | 1005 Mbit/s | 0.286 ms | 0.36 / 0.28 | 15.2 / 13.3 MB |
-| udp | 991 Mbit/s | 0.288 ms | 0.35 / 0.33 | 13.5 / 14.0 MB |
-| quic (stream) | 666 Mbit/s | 0.435 ms | 0.62 / 0.49 | 14.9 / 15.1 MB |
-| quic (DATAGRAM) | 656 Mbit/s | 0.390 ms | 0.57 / 0.53 | 14.8 / 14.9 MB |
-| wss | 500 Mbit/s | 0.350 ms | 0.60 / 0.77 | 14.9 / 14.0 MB |
+| Carrier | Goodput (final build) | Goodput (earlier run, Go 1.25 build) | In-tunnel RTT | CPU A / B (s) | RSS A / B |
+|---|---|---|---|---|---|
+| tcp | 703 Mbit/s | 1063 Mbit/s | 0.36 ms | 0.97 / 0.93 | 16.4 / 15.0 MB |
+| udp | 737 Mbit/s | 958 Mbit/s | 0.33 ms | 0.91 / 0.90 | 15.2 / 15.3 MB |
+| quic (stream) | 418 Mbit/s | 646 Mbit/s | 0.56 ms | 1.80 / 1.59 | 17.7 / 16.7 MB |
+| quic (DATAGRAM) | 432 Mbit/s | 638 Mbit/s | 0.52 ms | 1.56 / 1.48 | 16.6 / 16.8 MB |
+| wss | 448 Mbit/s | 528 Mbit/s | 0.44 ms | 1.41 / 1.78 | 16.5 / 17.2 MB |
 
-Run-to-run variation on this VM was roughly ±10 %.
+The two runs were taken at different times on the same VM. The difference is
+consistent with noisy shared CPUs: both runs are CPU-bound (≈1 s of CPU per
+100 MiB on each side). It has not been attributed to the dependency upgrade.
+
+## Carrier lab (`sudo tests/lab/netns-extended.sh bin carriers`)
+
+Each carrier is checked for connect time, in-tunnel RTT, a short TCP transfer,
+20/20 UDP echoes, reconnect after a peer restart, and failure detection
+after the path is blocked:
+
+| Carrier | Connect | Reconnect after peer restart | Failure detection |
+|---|---|---|---|
+| tcp, udp, quic, quic-dgram, wss, ws, icmp | 0.03–0.24 s | 0.46–3.5 s | 3.1–3.6 s |
+
+## Failover (`netns-extended.sh failover`, `endpoints`), three full runs
+
+| Scenario | Result |
+|---|---|
+| TCP blocked → QUIC | 3.1–4.5 s; ping outage ≈2.6–3.9 s (20 pps) |
+| QUIC blocked → WSS | 2.1–4.0 s; outage ≈1.9–3.6 s |
+| unblock → preempt back to TCP | 1.8–8.4 s, 0 packets lost (make-before-break) |
+| long-lived inner TCP connection | survived 9 switches per run |
+| endpoint e1 → e2 → e3, back to e1 | 3.4–3.6 s, 5.7–7.8 s, preempt 6.6–6.8 s |
+
+## Soak (`sudo tests/lab/netns-soak.sh bin 360`)
+
+Over 360 s, TCP was blocked once per minute (for roughly 20–35 s) while a continuous inner
+TCP echo stream, UDP echo and 5 pps ping ran:
+
+| Metric | Value |
+|---|---|
+| inner TCP echoed | 2.16 GB, byte-exact |
+| UDP echo | 3283/3293 |
+| carrier switches | 10 (one per block and unblock) |
+| longest ping outage | 3.8 s |
+| RSS | 12.6–20.7 MB, no growth |
+| goroutines / fds | return to baseline (A 13/8, B 21/11 on TCP) |
+
+The first soak run exposed a 53 s undetected outage (bug #7 in FINAL_AUDIT.md).
+The numbers above are from the run after the fix.
 
 ## Acceptance lab timings (`sudo tests/lab/netns-acceptance.sh bin`)
 
@@ -50,6 +90,6 @@ Failover time ≈ detection (`failed_after_missed × interval` or idle timeout)
 ## Not measured
 
 - Behaviour under real packet loss/jitter (netem unavailable here).
-- Long-duration soak, many concurrent peers, multi-core scaling.
+- Real Internet paths; multi-hour soak; many concurrent peers; multi-core scaling.
 - TCP-over-TCP penalty under loss: expected to be significant for tcp/wss/quic
   stream carriers; prefer udp or quic DATAGRAM on lossy paths.

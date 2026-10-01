@@ -35,20 +35,30 @@ func OpenDevice(name string) (*Device, error) {
 	if !validName(name) {
 		return nil, fmt.Errorf("invalid TUN interface name %q", name)
 	}
-	f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
+	// Open with raw syscalls and only hand the descriptor to the Go runtime
+	// poller *after* TUNSETIFF: an unattached TUN fd reports EPOLLERR, and
+	// registering it early (os.OpenFile + Fd()) yields "not pollable" reads on
+	// newer Go/kernel combinations. A pollable non-blocking fd also lets
+	// Close() unblock a pending Read for clean shutdown.
+	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/net/tun: %w", err)
 	}
 	var ifr [40]byte
 	copy(ifr[:ifNameSize], name)
 	*(*uint16)(unsafe.Pointer(&ifr[ifNameSize])) = iffTUN | iffNoPI
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), iocSetIFF, uintptr(unsafe.Pointer(&ifr[0]))); errno != 0 {
-		f.Close()
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), iocSetIFF, uintptr(unsafe.Pointer(&ifr[0]))); errno != 0 {
+		syscall.Close(fd)
 		if errno == syscall.EPERM {
 			return nil, fmt.Errorf("TUNSETIFF %q: permission denied (need CAP_NET_ADMIN): %w", name, errno)
 		}
 		return nil, fmt.Errorf("TUNSETIFF %q: %w", name, errno)
 	}
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("set non-blocking on TUN fd: %w", err)
+	}
+	f := os.NewFile(uintptr(fd), "/dev/net/tun")
 	got := string(ifr[:ifNameSize])
 	if i := strings.IndexByte(got, 0); i >= 0 {
 		got = got[:i]

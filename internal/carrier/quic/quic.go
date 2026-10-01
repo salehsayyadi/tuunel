@@ -20,8 +20,10 @@ import (
 var alpn = []string{"tuunel/1"}
 
 // DatagramMax is a conservative DATAGRAM payload limit that fits the initial
-// QUIC packet size (1252 bytes of UDP payload) used before PMTU discovery.
-const DatagramMax = 1180
+// QUIC packet size (InitialPacketSize = 1200 bytes of UDP payload, the RFC 9000
+// minimum) used before PMTU discovery: 1200 - (1 flags + 20 max conn ID +
+// 4 packet number + 16 AEAD tag + 3 frame header) = 1156 >= 1150.
+const DatagramMax = 1150
 
 type Carrier struct{ opts carrier.Options }
 
@@ -41,7 +43,11 @@ func (c *Carrier) Check(context.Context) error { return nil }
 
 func (c *Carrier) config() *quicgo.Config {
 	return &quicgo.Config{
-		EnableDatagrams:      c.opts.Datagrams,
+		EnableDatagrams: c.opts.Datagrams,
+		// RFC 9000 minimum. quic-go's default (1280-byte UDP payload) needs a
+		// >=1308-byte IPv4 path and failed the handshake on 1280/1300 paths in
+		// the MTU lab. DPLPMTUD still grows the size once connected.
+		InitialPacketSize:    1200,
 		KeepAlivePeriod:      10 * time.Second,
 		MaxIdleTimeout:       30 * time.Second,
 		HandshakeIdleTimeout: 10 * time.Second,
@@ -61,7 +67,7 @@ func (c *Carrier) Dial(ctx context.Context, address string) (carrier.Conn, error
 		return nil, err
 	}
 	if c.opts.Datagrams {
-		if !qc.ConnectionState().SupportsDatagrams {
+		if !qc.ConnectionState().SupportsDatagrams.Remote {
 			_ = qc.CloseWithError(0, "")
 			return nil, errors.New("quic: peer does not support DATAGRAM frames")
 		}
@@ -76,8 +82,8 @@ func (c *Carrier) Dial(ctx context.Context, address string) (carrier.Conn, error
 }
 
 type streamRWC struct {
-	quicgo.Stream
-	qc quicgo.Connection
+	*quicgo.Stream
+	qc *quicgo.Conn
 }
 
 func (s streamRWC) Close() error {
@@ -86,12 +92,12 @@ func (s streamRWC) Close() error {
 	return s.qc.CloseWithError(0, "closed")
 }
 
-func newStreamConn(qc quicgo.Connection, st quicgo.Stream) carrier.Conn {
+func newStreamConn(qc *quicgo.Conn, st *quicgo.Stream) carrier.Conn {
 	return carrier.NewStreamConn(streamRWC{Stream: st, qc: qc}, qc.LocalAddr(), qc.RemoteAddr())
 }
 
 type dgramConn struct {
-	qc   quicgo.Connection
+	qc   *quicgo.Conn
 	once sync.Once
 }
 
@@ -154,7 +160,7 @@ func (l *listener) Accept(ctx context.Context) (carrier.Conn, error) {
 			continue
 		}
 		if l.opts.Datagrams {
-			if !qc.ConnectionState().SupportsDatagrams {
+			if !qc.ConnectionState().SupportsDatagrams.Remote {
 				_ = qc.CloseWithError(0x11, "datagrams required")
 				continue
 			}

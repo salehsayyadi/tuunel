@@ -90,3 +90,31 @@ One reader goroutine for the TUN device, one reader per link, one health loop
 per peer, one accept loop per listener. Per-link writes are serialized by the
 carrier connection. All shared counters are atomics; `go test -race ./...` is
 clean.
+
+- **Link reader lifecycle.** Each accepted or dialed carrier connection gets a
+  `pump` goroutine that feeds a bounded channel (64 messages). Every exit
+  path (rejected handshake, dial abort, link close, failover) calls
+  `pump.stop()`, which closes the connection and a `done` channel. A blocked
+  reader is therefore always released and cannot leak, even when an
+  unauthenticated peer floods a connection that is never accepted.
+- **TUN device.** `/dev/net/tun` is opened with `syscall.Open`, configured with
+  `TUNSETIFF`, switched to non-blocking, and only then wrapped by
+  `os.NewFile`. This lets the Go runtime poller manage it, so `Close` unblocks
+  the reader on shutdown.
+- **Health loop never blocks on I/O.** Health pings and rekey initiations
+  are written from short-lived goroutines (at most one ping in flight per
+  link). On a black-holed stream carrier, writes can block behind a full
+  socket buffer. The loop keeps evaluating, a ping that cannot be queued
+  counts as lost, and the link is declared failed. Closing the link
+  unblocks every pending writer.
+- **Per-link MTU.** The global plan sets the TUN MTU. For datagram carriers,
+  each link also asks the kernel (`IP_MTU` on a connected UDP socket, which
+  sends no traffic) for the path MTU towards that link's remote address, and
+  uses the smaller value. This matters on listeners, which cannot know their
+  peers' paths in advance, and for endpoints with different MTUs. Packets above
+  the link limit are fragmented (IPv4 without DF) or answered with ICMP/ICMPv6
+  "too big". The ICMP source is the packet's original destination, never a
+  local address, which Linux would drop as a martian.
+- **Self-metrics.** `/api/metrics` exports `tuunel_goroutines`,
+  `tuunel_heap_inuse_bytes` and `tuunel_open_fds`, which the soak test uses to
+  detect leaks.

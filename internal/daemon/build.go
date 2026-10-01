@@ -145,6 +145,7 @@ func BuildPlan(cfg *config.Config, detectMTU func(string) (int, error)) (*Plan, 
 	p.MTU = plan
 	ec.MTU = plan.TunMTU
 	ec.PathMTU = pathMTU
+	ec.DetectPathMTU = detectMTU
 	return p, nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math/rand/v2"
 	"net"
+	"sync"
 	"sync/atomic"
 
 	"github.com/salehsayyadi/tuunel/internal/carrier"
@@ -17,6 +18,7 @@ type Carrier struct {
 	name  string
 	down  atomic.Bool
 	loss  atomic.Uint32 // percent
+	stall atomic.Bool
 }
 
 func Wrap(c carrier.Carrier, name string) *Carrier {
@@ -25,6 +27,10 @@ func Wrap(c carrier.Carrier, name string) *Carrier {
 
 // SetDown blackholes all traffic (existing and new connections) when true.
 func (c *Carrier) SetDown(v bool) { c.down.Store(v) }
+
+// SetStall makes writes block until the connection is closed and drops all
+// reads, like a black-holed stream carrier whose socket send buffer is full.
+func (c *Carrier) SetStall(v bool) { c.stall.Store(v) }
 
 // SetLoss drops the given percentage of messages in both directions.
 func (c *Carrier) SetLoss(pct int) { c.loss.Store(uint32(pct)) }
@@ -43,7 +49,7 @@ func (c *Carrier) Dial(ctx context.Context, a string) (carrier.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &conn{Conn: x, c: c}, nil
+	return newConn(x, c), nil
 }
 
 func (c *Carrier) Listen(ctx context.Context, a string) (carrier.Listener, error) {
@@ -64,16 +70,27 @@ func (l *listener) Accept(ctx context.Context) (carrier.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &conn{Conn: x, c: l.c}, nil
+	return newConn(x, l.c), nil
 }
 
 type conn struct {
 	carrier.Conn
-	c *Carrier
+	c      *Carrier
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newConn(x carrier.Conn, c *Carrier) *conn {
+	return &conn{Conn: x, c: c, closed: make(chan struct{})}
+}
+
+func (x *conn) Close() error {
+	x.once.Do(func() { close(x.closed) })
+	return x.Conn.Close()
 }
 
 func (x *conn) drop() bool {
-	if x.c.down.Load() {
+	if x.c.down.Load() || x.c.stall.Load() {
 		return true
 	}
 	l := x.c.loss.Load()
@@ -90,6 +107,10 @@ func (x *conn) ReadMessage(b []byte) (int, error) {
 }
 
 func (x *conn) WriteMessage(b []byte) error {
+	if x.c.stall.Load() {
+		<-x.closed
+		return net.ErrClosed
+	}
 	if x.drop() {
 		return nil
 	}

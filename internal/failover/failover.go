@@ -59,7 +59,10 @@ type Manager struct {
 	active      *Candidate
 	activeSince time.Time
 	switches    int
-	rng         *rand.Rand
+	// last is the most recently connected candidate; unlike active it is
+	// not cleared on failure, so failure-driven switches are counted too.
+	last *Candidate
+	rng  *rand.Rand
 }
 
 func New(p Policy, cands []*Candidate) *Manager {
@@ -204,10 +207,10 @@ func (m *Manager) Failure(c *Candidate, now time.Time, err error) {
 func (m *Manager) Connected(c *Candidate, now time.Time, rtt time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.active != nil && m.active != c {
+	if m.last != nil && m.last != c {
 		m.switches++
 	}
-	m.active, m.activeSince = c, now
+	m.active, m.activeSince, m.last = c, now, c
 	c.Failures, c.Parked, c.LastError = 0, false, ""
 	c.NextAttempt = time.Time{}
 	if rtt > 0 {

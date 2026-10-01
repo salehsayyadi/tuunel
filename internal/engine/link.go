@@ -43,6 +43,7 @@ type link struct {
 	established time.Time
 	lastRecv    atomic.Int64
 	pingSeq     atomic.Uint64
+	pingBusy    atomic.Bool // a health ping write is in progress
 	confirmed   chan struct{}
 	confirmOnce sync.Once
 	closed      chan struct{}
@@ -56,15 +57,23 @@ type link struct {
 
 func newLink(e *Engine, p *peer, conn carrier.Conn, pm *pump, c carrier.Carrier, endpoint string, cand *failover.Candidate, initiator, probe bool) *link {
 	outer6 := false
-	if a, ok := conn.RemoteAddr().(interface{ String() string }); ok && a != nil {
-		if host, _, err := net.SplitHostPort(a.String()); err == nil {
-			if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
-				outer6 = true
+	pathMTU := e.cfg.PathMTU
+	if a := conn.RemoteAddr(); a != nil {
+		host, port, err := net.SplitHostPort(a.String())
+		if err != nil { // e.g. *net.IPAddr of the ICMP carrier
+			host, port = a.String(), "9"
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			outer6 = ip.To4() == nil
+			if e.cfg.DetectPathMTU != nil && !c.Capabilities().Segmenting {
+				if m, err := e.cfg.DetectPathMTU(net.JoinHostPort(host, port)); err == nil && m >= 576 && m < pathMTU {
+					pathMTU = m
+				}
 			}
 		}
 	}
 	l := &link{e: e, peer: p, conn: conn, pm: pm, carrier: c, endpoint: endpoint, cand: cand, initiator: initiator, probe: probe,
-		limit:   mtu.LinkLimit(e.cfg.PathMTU, c.Capabilities(), outer6),
+		limit:   mtu.LinkLimit(pathMTU, c.Capabilities(), outer6),
 		tracker: health.NewTracker(e.cfg.Health), established: time.Now(),
 		confirmed: make(chan struct{}), closed: make(chan struct{})}
 	l.lastRecv.Store(time.Now().UnixNano())
@@ -86,7 +95,11 @@ func (l *link) close(reason string) {
 			_ = l.send(session.InnerClose, nil)
 		}
 		close(l.closed)
-		_ = l.conn.Close()
+		if l.pm != nil {
+			l.pm.stop()
+		} else {
+			_ = l.conn.Close()
+		}
 		l.peer.linkClosed(l, reason)
 	})
 }
@@ -253,9 +266,21 @@ func (l *link) healthLoop(ctx context.Context) {
 		case <-l.closed:
 			return
 		case now := <-t.C:
-			if err := l.sendPing(0); err != nil && !errors.Is(err, carrier.ErrMessageTooLarge) {
-				l.close("write failed: " + err.Error())
-				return
+			// Ping asynchronously: on a black-holed stream carrier the
+			// write can block indefinitely behind data in a full socket
+			// buffer, and health evaluation must keep running so the link is
+			// declared failed. A ping that cannot even be queued because the
+			// previous one is still blocked is registered as sent, so it
+			// expires as lost.
+			if l.pingBusy.CompareAndSwap(false, true) {
+				go func() {
+					defer l.pingBusy.Store(false)
+					if err := l.sendPing(0); err != nil && !errors.Is(err, carrier.ErrMessageTooLarge) {
+						l.close("write failed: " + err.Error())
+					}
+				}()
+			} else {
+				l.tracker.OnSent(l.pingSeq.Add(1), now)
 			}
 			l.tracker.Expire(now)
 			st := l.tracker.Evaluate(now)
@@ -307,9 +332,14 @@ func (l *link) maybeRekey(now time.Time) {
 	l.mu.Lock()
 	l.pending = append(l.pending, in)
 	l.mu.Unlock()
-	if err := l.conn.WriteMessage(msg); err == nil {
-		l.e.log.Debug("rekey initiated", "peer", l.peer.cfg.Name, "carrier", l.carrier.Name())
-	}
+	// Asynchronous for the same reason as health pings: a blocked write must
+	// not stall the health loop. A lost initiation is retried after
+	// HandshakeTimeout (rekeyAt above).
+	go func() {
+		if err := l.conn.WriteMessage(msg); err == nil {
+			l.e.log.Debug("rekey initiated", "peer", l.peer.cfg.Name, "carrier", l.carrier.Name())
+		}
+	}()
 }
 
 // probeServe keeps a probe link alive only while the prober is active.
@@ -358,7 +388,15 @@ func (l *link) sendIP(pkt []byte) error {
 	if v6 && mtuv < packet.MinIPv6MTU {
 		return nil // cannot signal below the IPv6 minimum; drop
 	}
-	if icmp := packet.TooBig(pkt, mtuv, l.e.localAddr(v6)); icmp != nil {
+	// The ICMP error is injected into the local TUN device, so its source
+	// must not be a local address: Linux drops such packets as martians and
+	// the sender would never learn the smaller MTU. Use the unreachable
+	// destination itself (routed via the tunnel, so rp_filter accepts it).
+	from := l.e.localAddr(v6)
+	if _, dst := packet.Addrs(pkt); dst.IsGlobalUnicast() { // includes RFC 1918 and ULA
+		from = dst
+	}
+	if icmp := packet.TooBig(pkt, mtuv, from); icmp != nil {
 		_, _ = l.e.cfg.Device.Write(icmp)
 	}
 	return nil

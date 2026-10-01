@@ -247,6 +247,23 @@ func TestCarrierFailoverAndRecovery(t *testing.T) {
 	exchange(t, a, b, "after-recovery")
 }
 
+// A black-holed stream carrier whose writes block (full socket buffer) must
+// still be declared failed: health evaluation may not wait on a blocked ping
+// write (regression found by the soak test: ~55 s undetected outage).
+func TestStalledWriterCarrierFailsOver(t *testing.T) {
+	tcpC := faulty.Wrap(tcp.New(carrier.Options{}), "tcp")
+	wssC := faulty.Wrap(websocket.New(carrier.Options{}), "wss")
+	a, b := startPair(t, []carrier.Carrier{tcpC, wssC}, []string{freePort(t, "tcp"), freePort(t, "tcp")}, func(ca, cb *Config) {
+		ca.Failover.Preempt = false
+	})
+	waitUp(t, a, "tcp", 5*time.Second)
+	tcpC.SetStall(true)
+	start := time.Now()
+	waitUp(t, a, "wss", 12*time.Second)
+	t.Logf("stalled tcp -> wss in %v", time.Since(start))
+	exchange(t, a, b, "after-stall-failover")
+}
+
 func TestDegradedCarrierSwitch(t *testing.T) {
 	udpC := faulty.Wrap(udp.New(carrier.Options{}), "udp")
 	tcpC := faulty.Wrap(tcp.New(carrier.Options{}), "tcp")
@@ -349,6 +366,11 @@ func TestOversizePackets(t *testing.T) {
 		select {
 		case p := <-a.dev.out:
 			if p[9] == 1 && p[20] == 3 && p[21] == 4 {
+				// Source must be non-local (the unreachable destination),
+				// otherwise the kernel drops it as a martian.
+				if src := net.IP(p[12:16]).String(); src != "10.200.0.2" {
+					t.Fatalf("ICMP frag-needed source = %s, want 10.200.0.2 (original destination)", src)
+				}
 				return
 			}
 		case <-timeout:

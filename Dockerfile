@@ -1,5 +1,5 @@
 # Build + unit tests
-FROM golang:1.23-bookworm AS build
+FROM golang:1.27-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

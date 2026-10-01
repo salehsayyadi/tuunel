@@ -50,12 +50,18 @@ type ListenerConfig struct {
 }
 
 type Config struct {
-	NodeID           string
-	Key              session.KeyPair
-	PSK              []byte
-	Device           Device
-	MTU              int
-	PathMTU          int
+	NodeID  string
+	Key     session.KeyPair
+	PSK     []byte
+	Device  Device
+	MTU     int
+	PathMTU int
+	// DetectPathMTU, when set, is asked for the kernel's path MTU towards
+	// each link's remote address (host:port). A smaller value than PathMTU
+	// lowers that link's limit, so datagram carriers never emit outer
+	// packets larger than the real path (e.g. on a listener, whose plan
+	// cannot know the peers' paths in advance).
+	DetectPathMTU    func(address string) (int, error)
 	LocalAddrs       []netip.Addr
 	Peers            []PeerConfig
 	Listeners        []ListenerConfig
@@ -295,12 +301,15 @@ func (e *Engine) acceptLoop(ctx context.Context, ln carrier.Listener, c carrier.
 // pump reads messages from conn into a channel so that handshake code and
 // the link read loop share a single reader goroutine.
 type pump struct {
-	ch  chan []byte
-	err error
+	ch       chan []byte
+	err      error
+	done     chan struct{}
+	stopOnce sync.Once
+	conn     carrier.Conn
 }
 
 func startPump(conn carrier.Conn) *pump {
-	p := &pump{ch: make(chan []byte, 64)}
+	p := &pump{ch: make(chan []byte, 64), done: make(chan struct{}), conn: conn}
 	go func() {
 		defer close(p.ch)
 		buf := make([]byte, carrier.MaxMessage)
@@ -313,10 +322,23 @@ func startPump(conn carrier.Conn) *pump {
 			if n == 0 {
 				continue
 			}
-			p.ch <- append([]byte(nil), buf[:n]...)
+			select {
+			case p.ch <- append([]byte(nil), buf[:n]...):
+			case <-p.done:
+				// Nobody will consume more messages (handshake rejected, link
+				// closed). Without this the goroutine and up to 64 buffered
+				// messages leaked whenever a peer kept sending.
+				return
+			}
 		}
 	}()
 	return p
+}
+
+// stop closes the connection and releases the reader goroutine.
+func (p *pump) stop() {
+	p.stopOnce.Do(func() { close(p.done) })
+	_ = p.conn.Close()
 }
 
 var errTimeout = errors.New("timeout")
@@ -342,19 +364,19 @@ func (e *Engine) respond(ctx context.Context, conn carrier.Conn, c carrier.Carri
 	pm := startPump(conn)
 	msg, err := pm.next(e.cfg.HandshakeTimeout)
 	if err != nil {
-		_ = conn.Close()
+		pm.stop()
 		return
 	}
 	sess, reply, err := e.responder.Respond(msg)
 	if err != nil {
 		e.counters.AuthFailures.Add(1)
 		e.log.Debug("handshake rejected", "carrier", c.Name(), "remote", addrString(conn), "error", err)
-		_ = conn.Close()
+		pm.stop()
 		return
 	}
 	p := e.byKey[string(sess.PeerKey)]
 	if err := conn.WriteMessage(reply); err != nil {
-		_ = conn.Close()
+		pm.stop()
 		return
 	}
 	l := newLink(e, p, conn, pm, c, "", nil, false, sess.Probe)
@@ -423,12 +445,12 @@ func (e *Engine) dialAbortable(ctx, abort context.Context, p *peer, cand *failov
 	for i := 0; i < attempts && sess == nil; i++ {
 		in, msg, err := session.Initiate(e.cfg.Key, p.cfg.PublicKey, e.cfg.PSK, e.cfg.NodeID, probe)
 		if err != nil {
-			conn.Close()
+			pm.stop()
 			return nil, 0, err
 		}
 		pend = append(pend, in)
 		if err := conn.WriteMessage(msg); err != nil {
-			conn.Close()
+			pm.stop()
 			return nil, 0, fmt.Errorf("handshake write: %w", err)
 		}
 		deadline := time.Now().Add(per)
@@ -438,7 +460,7 @@ func (e *Engine) dialAbortable(ctx, abort context.Context, p *peer, cand *failov
 				if errors.Is(err, errTimeout) {
 					break
 				}
-				conn.Close()
+				pm.stop()
 				return nil, 0, fmt.Errorf("handshake read: %w", err)
 			}
 			if len(m) < 1 || m[0] != session.TypeHandshakeResp {
@@ -454,11 +476,11 @@ func (e *Engine) dialAbortable(ctx, abort context.Context, p *peer, cand *failov
 		}
 	}
 	if !stopConn() || dctx.Err() != nil {
-		conn.Close()
+		pm.stop()
 		return nil, 0, fmt.Errorf("handshake: %w", dctx.Err())
 	}
 	if sess == nil {
-		conn.Close()
+		pm.stop()
 		return nil, 0, errors.New("handshake failed: no valid response (peer unreachable, blocked, or key mismatch)")
 	}
 	rtt := time.Since(start)
