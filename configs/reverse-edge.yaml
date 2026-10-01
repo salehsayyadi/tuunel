@@ -1,0 +1,17 @@
+# Reverse tunnel, EDGE side (public). The remote node dials out to this edge;
+# the edge exposes the remote node's services through the tunnel.
+node: {id: edge-01}
+interface: {name: tun0, addresses: ["10.200.0.1/24"], mtu: auto}
+security: {private_key_file: /etc/tuunel/node.key}
+listen:
+  - {carrier: tcp, address: "0.0.0.0:443"}
+  - {carrier: wss, address: "0.0.0.0:8443"}
+peers:                                   # multiple remote nodes = multiple tunnels
+  - {name: remote-1, public_key: "REPLACE_ME_1", allowed_ips: ["10.200.0.2/32"]}
+  - {name: remote-2, public_key: "REPLACE_ME_2", allowed_ips: ["10.200.0.3/32"]}
+forwarding:                              # reloadable with: systemctl reload tuunel
+  tcp:
+    - {listen: "0.0.0.0:80",   target: "10.200.0.2:8080"}
+    - {listen: "0.0.0.0:2222", target: "10.200.0.3:22", max_connections: 50}
+  udp:
+    - {listen: "0.0.0.0:51820", target: "10.200.0.2:51820"}   # e.g. a WireGuard server on remote-1

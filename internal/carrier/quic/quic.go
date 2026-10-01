@@ -1,0 +1,175 @@
+// Package quic implements the QUIC carrier using github.com/quic-go/quic-go.
+// Two modes are supported: a single bidirectional stream with length framing
+// (default, reliable) and RFC 9221 DATAGRAM frames (unreliable, no
+// head-of-line blocking, size-limited by the QUIC packet size).
+package quic
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"sync"
+	"time"
+
+	quicgo "github.com/quic-go/quic-go"
+
+	"github.com/salehsayyadi/tuunel/internal/carrier"
+)
+
+var alpn = []string{"tuunel/1"}
+
+// DatagramMax is a conservative DATAGRAM payload limit that fits the initial
+// QUIC packet size (1252 bytes of UDP payload) used before PMTU discovery.
+const DatagramMax = 1180
+
+type Carrier struct{ opts carrier.Options }
+
+func New(opts carrier.Options) *Carrier { return &Carrier{opts: opts} }
+
+func (c *Carrier) Name() string { return "quic" }
+
+func (c *Carrier) Capabilities() carrier.Capabilities {
+	if c.opts.Datagrams {
+		// UDP 8 + short header (1 + 4 conn ID + up to 4 PN) + tag 16 + frame 3
+		return carrier.Capabilities{Datagram: true, MaxMessage: DatagramMax, Overhead: 36}
+	}
+	return carrier.Capabilities{Reliable: true, Ordered: true, Segmenting: true, MaxMessage: carrier.MaxMessage, Overhead: 52}
+}
+
+func (c *Carrier) Check(context.Context) error { return nil }
+
+func (c *Carrier) config() *quicgo.Config {
+	return &quicgo.Config{
+		EnableDatagrams:      c.opts.Datagrams,
+		KeepAlivePeriod:      10 * time.Second,
+		MaxIdleTimeout:       30 * time.Second,
+		HandshakeIdleTimeout: 10 * time.Second,
+	}
+}
+
+func (c *Carrier) Dial(ctx context.Context, address string) (carrier.Conn, error) {
+	tlsConf, err := carrier.ClientTLS(c.opts, alpn)
+	if err != nil {
+		return nil, err
+	}
+	if tlsConf.ServerName == "" {
+		tlsConf.ServerName = "tuunel"
+	}
+	qc, err := quicgo.DialAddr(ctx, address, tlsConf, c.config())
+	if err != nil {
+		return nil, err
+	}
+	if c.opts.Datagrams {
+		if !qc.ConnectionState().SupportsDatagrams {
+			_ = qc.CloseWithError(0, "")
+			return nil, errors.New("quic: peer does not support DATAGRAM frames")
+		}
+		return &dgramConn{qc: qc}, nil
+	}
+	st, err := qc.OpenStreamSync(ctx)
+	if err != nil {
+		_ = qc.CloseWithError(0, "")
+		return nil, err
+	}
+	return newStreamConn(qc, st), nil
+}
+
+type streamRWC struct {
+	quicgo.Stream
+	qc quicgo.Connection
+}
+
+func (s streamRWC) Close() error {
+	s.Stream.CancelRead(0)
+	_ = s.Stream.Close()
+	return s.qc.CloseWithError(0, "closed")
+}
+
+func newStreamConn(qc quicgo.Connection, st quicgo.Stream) carrier.Conn {
+	return carrier.NewStreamConn(streamRWC{Stream: st, qc: qc}, qc.LocalAddr(), qc.RemoteAddr())
+}
+
+type dgramConn struct {
+	qc   quicgo.Connection
+	once sync.Once
+}
+
+func (d *dgramConn) ReadMessage(b []byte) (int, error) {
+	m, err := d.qc.ReceiveDatagram(context.Background())
+	if err != nil {
+		return 0, err
+	}
+	if len(m) > len(b) {
+		return 0, carrier.ErrMessageTooLarge
+	}
+	return copy(b, m), nil
+}
+
+func (d *dgramConn) WriteMessage(b []byte) error {
+	if len(b) == 0 || len(b) > DatagramMax {
+		return fmt.Errorf("%w: %d > %d", carrier.ErrMessageTooLarge, len(b), DatagramMax)
+	}
+	err := d.qc.SendDatagram(b)
+	var tooLarge *quicgo.DatagramTooLargeError
+	if errors.As(err, &tooLarge) {
+		return fmt.Errorf("%w: %v", carrier.ErrMessageTooLarge, err)
+	}
+	return err
+}
+
+func (d *dgramConn) Close() error {
+	d.once.Do(func() { _ = d.qc.CloseWithError(0, "closed") })
+	return nil
+}
+func (d *dgramConn) LocalAddr() net.Addr  { return d.qc.LocalAddr() }
+func (d *dgramConn) RemoteAddr() net.Addr { return d.qc.RemoteAddr() }
+
+type listener struct {
+	ln    *quicgo.Listener
+	opts  carrier.Options
+	limit *carrier.Limiter
+}
+
+func (c *Carrier) Listen(ctx context.Context, address string) (carrier.Listener, error) {
+	tlsConf, err := carrier.ServerTLS(c.opts, alpn)
+	if err != nil {
+		return nil, err
+	}
+	ln, err := quicgo.ListenAddr(address, tlsConf, c.config())
+	if err != nil {
+		return nil, err
+	}
+	return &listener{ln: ln, opts: c.opts, limit: carrier.NewLimiter(10, 20)}, nil
+}
+
+func (l *listener) Accept(ctx context.Context) (carrier.Conn, error) {
+	for {
+		qc, err := l.ln.Accept(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !l.limit.Allow(qc.RemoteAddr(), time.Now()) {
+			_ = qc.CloseWithError(0x10, "rate limited")
+			continue
+		}
+		if l.opts.Datagrams {
+			if !qc.ConnectionState().SupportsDatagrams {
+				_ = qc.CloseWithError(0x11, "datagrams required")
+				continue
+			}
+			return &dgramConn{qc: qc}, nil
+		}
+		actx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		st, err := qc.AcceptStream(actx)
+		cancel()
+		if err != nil {
+			_ = qc.CloseWithError(0x12, "no stream")
+			continue
+		}
+		return newStreamConn(qc, st), nil
+	}
+}
+
+func (l *listener) Close() error   { return l.ln.Close() }
+func (l *listener) Addr() net.Addr { return l.ln.Addr() }

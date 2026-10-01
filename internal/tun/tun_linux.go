@@ -1,11 +1,13 @@
 //go:build linux
 
+// Package tun manages the Linux TUN device lifecycle.
 package tun
 
 import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -17,18 +19,60 @@ const (
 	iffNoPI    = 0x1000
 )
 
-// Open attaches to an existing Linux TUN interface or creates it when absent.
-// Addressing and routes are deliberately configured by the local administrator.
-func Open(name string) (*os.File, error) {
-	if name == "" || len(name) >= ifNameSize || strings.ContainsAny(name, "/\x00") {
+// Device is an open TUN interface.
+type Device struct {
+	f    *os.File
+	name string
+	once sync.Once
+}
+
+func validName(name string) bool {
+	return name != "" && len(name) < ifNameSize && !strings.ContainsAny(name, "/\x00 \t\r\n")
+}
+
+// OpenDevice attaches to (creating if absent) a TUN interface with IFF_NO_PI.
+func OpenDevice(name string) (*Device, error) {
+	if !validName(name) {
 		return nil, fmt.Errorf("invalid TUN interface name %q", name)
 	}
 	f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
-	if err != nil { return nil, fmt.Errorf("open /dev/net/tun: %w", err) }
-	var ifr [40]byte // struct ifreq on supported Linux architectures
+	if err != nil {
+		return nil, fmt.Errorf("open /dev/net/tun: %w", err)
+	}
+	var ifr [40]byte
 	copy(ifr[:ifNameSize], name)
 	*(*uint16)(unsafe.Pointer(&ifr[ifNameSize])) = iffTUN | iffNoPI
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), iocSetIFF, uintptr(unsafe.Pointer(&ifr[0])))
-	if errno != 0 { f.Close(); return nil, fmt.Errorf("TUNSETIFF %q: %w", name, errno) }
-	return f, nil
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), iocSetIFF, uintptr(unsafe.Pointer(&ifr[0]))); errno != 0 {
+		f.Close()
+		if errno == syscall.EPERM {
+			return nil, fmt.Errorf("TUNSETIFF %q: permission denied (need CAP_NET_ADMIN): %w", name, errno)
+		}
+		return nil, fmt.Errorf("TUNSETIFF %q: %w", name, errno)
+	}
+	got := string(ifr[:ifNameSize])
+	if i := strings.IndexByte(got, 0); i >= 0 {
+		got = got[:i]
+	}
+	return &Device{f: f, name: got}, nil
+}
+
+// Open attaches to a TUN interface and returns the underlying file (compat).
+func Open(name string) (*os.File, error) {
+	d, err := OpenDevice(name)
+	if err != nil {
+		return nil, err
+	}
+	return d.f, nil
+}
+
+func (d *Device) File() *os.File { return d.f }
+func (d *Device) Name() string   { return d.name }
+
+func (d *Device) Read(b []byte) (int, error)  { return d.f.Read(b) }
+func (d *Device) Write(b []byte) (int, error) { return d.f.Write(b) }
+
+func (d *Device) Close() error {
+	var err error
+	d.once.Do(func() { err = d.f.Close() })
+	return err
 }

@@ -1,0 +1,14 @@
+# Failover lab. Needs a privileged container (netns, veth, TUN, iptables, tc).
+# Loss/latency steps need sch_netem and xt_statistic in the *host* kernel.
+#   docker compose run --rm lab
+#   docker compose run --rm bench
+services:
+  lab:
+    build: { context: ., target: lab }
+    privileged: true
+    devices: ["/dev/net/tun:/dev/net/tun"]
+  bench:
+    build: { context: ., target: lab }
+    privileged: true
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    entrypoint: ["/lab/netns-bench.sh", "/usr/local/bin", "50"]

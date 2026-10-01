@@ -1,0 +1,163 @@
+//go:build linux
+
+package daemon
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+
+	"github.com/salehsayyadi/tuunel/internal/api"
+	"github.com/salehsayyadi/tuunel/internal/config"
+	"github.com/salehsayyadi/tuunel/internal/engine"
+	"github.com/salehsayyadi/tuunel/internal/forwarding"
+	"github.com/salehsayyadi/tuunel/internal/mtu"
+	"github.com/salehsayyadi/tuunel/internal/netcfg"
+	"github.com/salehsayyadi/tuunel/internal/tun"
+)
+
+var Version = "dev"
+
+func NewLogger(c config.Log) *slog.Logger {
+	var lvl slog.Level
+	_ = lvl.UnmarshalText([]byte(c.Level))
+	opts := &slog.HandlerOptions{Level: lvl}
+	if c.Format == "json" {
+		return slog.New(slog.NewJSONHandler(os.Stderr, opts))
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, opts))
+}
+
+// Run starts the daemon and blocks until SIGINT/SIGTERM.
+func Run(configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	log := NewLogger(cfg.Log)
+	slog.SetDefault(log)
+	key, warn, err := LoadPrivateKey(cfg.Security.PrivateKeyFile)
+	if err != nil {
+		return err
+	}
+	if warn != "" {
+		log.Warn(warn)
+	}
+	psk, err := LoadPSK(cfg.Security.PresharedKeyFile)
+	if err != nil {
+		return err
+	}
+	plan, err := BuildPlan(cfg, mtu.DetectPathMTU)
+	if err != nil {
+		return err
+	}
+	for _, w := range plan.MTU.Warnings {
+		log.Warn("mtu", "detail", w)
+	}
+	if plan.MTU.Pathological {
+		log.Error("pathological MTU configuration: expect heavy fragmentation; see tunnelctl doctor")
+	}
+	for _, e := range plan.Routes.Errors {
+		log.Error("routing", "detail", e)
+	}
+	log.Info("configuration loaded", "node", cfg.Node.ID, "summary", describe(plan))
+
+	dev, err := tun.OpenDevice(cfg.Interface.Name)
+	if err != nil {
+		return err
+	}
+	defer dev.Close()
+	var nc *netcfg.Configurator
+	var applied []string
+	if *cfg.Interface.Manage {
+		nc, err = netcfg.New(dev.Name())
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := nc.Teardown(); err != nil {
+				log.Warn("interface teardown", "error", err)
+			}
+		}()
+		if err := nc.SetMTU(plan.MTU.TunMTU); err != nil {
+			return err
+		}
+		for _, pf := range cfg.Prefixes() {
+			if err := nc.AddAddr(pf); err != nil {
+				return err
+			}
+		}
+		if err := nc.Up(); err != nil {
+			return err
+		}
+		for _, r := range plan.Routes.Routes {
+			if err := nc.AddRoute(r); err != nil {
+				log.Error("route", "prefix", r.String(), "error", err)
+				continue
+			}
+			applied = append(applied, r.String())
+		}
+		log.Info("interface configured", "name", dev.Name(), "addresses", strings.Join(cfg.Interface.Addresses, ","), "mtu", plan.MTU.TunMTU, "routes", len(applied))
+	}
+
+	ec := plan.Engine
+	ec.Key, ec.PSK, ec.Device, ec.Logger = key, psk, dev, log
+	eng, err := engine.New(ec)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	fw := forwarding.New(log)
+	defer fw.Close()
+	if err := fw.Apply(ctx, ForwardRules(cfg)); err != nil {
+		log.Error("forwarding", "error", err)
+	}
+
+	var token []byte
+	if cfg.API.TokenFile != "" {
+		b, err := os.ReadFile(cfg.API.TokenFile)
+		if err != nil {
+			return fmt.Errorf("api token: %w", err)
+		}
+		token = []byte(strings.TrimSpace(string(b)))
+		if len(token) < 16 {
+			return fmt.Errorf("api token must be at least 16 characters")
+		}
+	}
+	srv := api.New(api.Backend{Engine: eng, Forwarding: fw, MTU: plan.MTU, Interface: dev.Name(), Version: Version,
+		Routes: func() []string { return applied }, RouteErrs: plan.Routes.Errors}, token)
+	if err := srv.ServeUnix(cfg.API.Socket); err != nil {
+		log.Warn("management socket unavailable", "path", cfg.API.Socket, "error", err)
+	}
+	if cfg.API.Listen != "" {
+		if err := srv.ServeTCP(cfg.API.Listen); err != nil {
+			return err
+		}
+	}
+	defer srv.Close()
+
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for range hup {
+			nc, err := config.Load(configPath)
+			if err != nil {
+				log.Error("reload rejected", "error", err)
+				continue
+			}
+			if err := fw.Apply(ctx, ForwardRules(nc)); err != nil {
+				log.Error("reload forwarding", "error", err)
+			}
+			log.Info("configuration reloaded (forwarding rules); other changes require restart")
+		}
+	}()
+	err = eng.Run(ctx)
+	log.Info("shutting down")
+	return err
+}
