@@ -6,7 +6,17 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
+
+// StreamWriteTimeout bounds one framed write on a stream carrier. A stream
+// that cannot accept a single frame for this long is dead (the health check
+// declares failure much earlier); without a bound, a write blocked on a
+// black-holed path would wedge the caller indefinitely. A timed-out or
+// failed write leaves the framing undefined, so the connection is closed.
+var StreamWriteTimeout = 5 * time.Second
+
+type writeDeadliner interface{ SetWriteDeadline(time.Time) error }
 
 // StreamConn adapts a reliable byte stream to message semantics using a
 // 16-bit big-endian length prefix. Zero-length messages are rejected.
@@ -53,10 +63,15 @@ func (c *StreamConn) WriteMessage(b []byte) error {
 	binary.BigEndian.PutUint16(c.wbuf[:2], uint16(len(b)))
 	copy(c.wbuf[2:], b)
 	buf := c.wbuf[:2+len(b)]
+	if d, ok := c.rw.(writeDeadliner); ok && StreamWriteTimeout > 0 {
+		_ = d.SetWriteDeadline(time.Now().Add(StreamWriteTimeout))
+	}
 	for len(buf) > 0 {
 		n, err := c.rw.Write(buf)
 		if err != nil {
-			return err
+			// partial frame possible: the stream can no longer be framed
+			_ = c.Close()
+			return fmt.Errorf("carrier: stream write: %w", err)
 		}
 		if n == 0 {
 			return io.ErrShortWrite

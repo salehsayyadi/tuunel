@@ -93,3 +93,18 @@ func TestPendingBounded(t *testing.T) {
 		t.Fatalf("pending unbounded: %d", len(tr.pending))
 	}
 }
+
+// One lost probe in a 20-probe window (5%) is noise and must not degrade the
+// link (it caused carrier flapping at 1-2% environmental loss); two must.
+func TestSingleLossIsNoise(t *testing.T) {
+	tr := NewTracker(DefaultThresholds())
+	now := feed(tr, time.Unix(1000, 0), 19, 10*time.Millisecond, 0)
+	now = feed(tr, now, 1, 10*time.Millisecond, 1) // exactly one loss
+	if s := tr.Snapshot().State; s != Available {
+		t.Fatalf("one loss in 20 degraded the link: %s", s)
+	}
+	feed(tr, now, 1, 10*time.Millisecond, 1) // second loss in the window
+	if s := tr.Snapshot().State; s != Degraded {
+		t.Fatalf("two losses in 20 (10%%) should degrade: %s", s)
+	}
+}

@@ -81,4 +81,5 @@ type Options struct {
 	Datagrams     bool   // QUIC: use DATAGRAM frames instead of a stream
 	MaxSessions   int    // listener-side limit on concurrent remote sessions
 	Experimental  bool   // administrator enablement for experimental carriers
+	ReplyFilter   string // ICMP listener: "auto" (nftables rule) or "off"
 }

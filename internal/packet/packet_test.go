@@ -127,3 +127,48 @@ func FuzzValidate(f *testing.F) {
 		}
 	})
 }
+
+func TestFragmentIPv6ReassemblesToOriginal(t *testing.T) {
+	payload := make([]byte, 1240) // 1280-byte packet
+	for i := range payload {
+		payload[i] = byte(i * 7)
+	}
+	p := make([]byte, IPv6Header+len(payload))
+	p[0] = 0x60
+	binary.BigEndian.PutUint16(p[4:6], uint16(len(payload)))
+	p[6], p[7] = 17, 64
+	p[8], p[23] = 0xfd, 1
+	p[24], p[39] = 0xfd, 2
+	copy(p[IPv6Header:], payload)
+	frags, err := FragmentIPv6(p, 1120, 0xabcdef01)
+	if err != nil || len(frags) != 2 {
+		t.Fatalf("frags=%d err=%v", len(frags), err)
+	}
+	var got []byte
+	for i, f := range frags {
+		if len(f) > 1120 {
+			t.Fatalf("fragment %d is %d bytes", i, len(f))
+		}
+		if err := Validate(f, 1500); err != nil {
+			t.Fatalf("fragment %d invalid: %v", i, err)
+		}
+		if f[6] != 44 || f[IPv6Header] != 17 || binary.BigEndian.Uint32(f[IPv6Header+4:]) != 0xabcdef01 {
+			t.Fatalf("fragment %d header wrong: % x", i, f[:IPv6Header+8])
+		}
+		fo := binary.BigEndian.Uint16(f[IPv6Header+2:])
+		if int(fo>>3)*8 != len(got) {
+			t.Fatalf("fragment %d offset %d, want %d", i, int(fo>>3)*8, len(got))
+		}
+		if more := fo&1 == 1; more != (i < len(frags)-1) {
+			t.Fatalf("fragment %d M flag %v", i, more)
+		}
+		got = append(got, f[IPv6Header+8:]...)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("reassembled payload differs")
+	}
+	p[6] = 0 // hop-by-hop options: refused
+	if _, err := FragmentIPv6(p, 1120, 1); err == nil {
+		t.Fatal("fragmented a packet with extension headers")
+	}
+}

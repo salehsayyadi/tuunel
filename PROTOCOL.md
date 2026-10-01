@@ -52,10 +52,11 @@ WebSocket binary frames over TCP) prefix each message with a 2-byte length.
 Echo request/reply with identifier per link; payload starts with magic
 `TUNQ` (client→server) or `TUNR` (server→client) followed by the session
 message. Max message 1400 bytes. Requires `CAP_NET_RAW` and
-`experimental.icmp: true`, and usually `net.ipv4.icmp_echo_ignore_all=1` on the
-server so the kernel does not answer the same requests. That sysctl also
-stops the host from answering ordinary pings, including pings to its tunnel
-address.
+`experimental.icmp: true`. The listener stops the kernel from answering the
+same requests with one nftables rule (table `ip tuunel_icmp`) that drops only
+kernel echo replies whose payload starts with `TUNQ`; ordinary pings keep
+working and no sysctl is changed (`experimental.icmp_reply_filter: off`
+disables it).
 
 ## Compatibility
 

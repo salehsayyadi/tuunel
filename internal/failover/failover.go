@@ -24,11 +24,20 @@ type Policy struct {
 	RecoverySuccesses int           // consecutive successful probes for RECOVERING -> AVAILABLE
 	Preempt           bool          // return to a better-ranked candidate once it is AVAILABLE
 	SwitchOnDegraded  bool          // leave a DEGRADED link for an AVAILABLE alternative
+	// DegradeHoldoff damps flapping between candidates that suffer the same
+	// (environmental) loss: a candidate left because it was DEGRADED is not
+	// chosen again voluntarily (preemption or degraded-switch) for this long;
+	// the hold doubles for each further degrade departure within
+	// degradeStreakWindow (capped at 32x). Hard failures are never damped.
+	DegradeHoldoff time.Duration
 }
+
+const degradeStreakWindow = 10 * time.Minute
 
 func DefaultPolicy() Policy {
 	return Policy{Order: "endpoint", EndpointSelection: "priority", BackoffInitial: time.Second, BackoffMax: time.Minute,
-		MaxRetries: 0, Cooldown: 5 * time.Minute, MinHold: 30 * time.Second, RecoverySuccesses: 3, Preempt: true, SwitchOnDegraded: true}
+		MaxRetries: 0, Cooldown: 5 * time.Minute, MinHold: 30 * time.Second, RecoverySuccesses: 3, Preempt: true, SwitchOnDegraded: true,
+		DegradeHoldoff: time.Minute}
 }
 
 type Candidate struct {
@@ -47,6 +56,11 @@ type Candidate struct {
 	ProbeOK        int
 	AvailableSince time.Time
 	Parked         bool
+	// HoldUntil: not eligible for voluntary switches before this time
+	// (set when the candidate was left because it was DEGRADED).
+	HoldUntil      time.Time
+	degradeStreak  int
+	lastDegradeOut time.Time
 }
 
 // Key identifies a candidate in logs and APIs.
@@ -59,6 +73,10 @@ type Manager struct {
 	active      *Candidate
 	activeSince time.Time
 	switches    int
+	// endpointSwitches counts switches that changed the endpoint;
+	// failureSwitches counts switches after the active candidate failed
+	// (as opposed to preemption or a degraded-path switch).
+	endpointSwitches, failureSwitches int
 	// last is the most recently connected candidate; unlike active it is
 	// not cleared on failure, so failure-driven switches are counted too.
 	last *Candidate
@@ -207,8 +225,26 @@ func (m *Manager) Failure(c *Candidate, now time.Time, err error) {
 func (m *Manager) Connected(c *Candidate, now time.Time, rtt time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if a := m.active; a != nil && a != c && a.State == health.Degraded && m.p.DegradeHoldoff > 0 {
+		// voluntary departure from a degraded candidate: hold it down
+		if now.Sub(a.lastDegradeOut) < degradeStreakWindow {
+			if a.degradeStreak < 5 {
+				a.degradeStreak++
+			}
+		} else {
+			a.degradeStreak = 0
+		}
+		a.lastDegradeOut = now
+		a.HoldUntil = now.Add(m.p.DegradeHoldoff << a.degradeStreak)
+	}
 	if m.last != nil && m.last != c {
 		m.switches++
+		if m.last.Endpoint != c.Endpoint {
+			m.endpointSwitches++
+		}
+		if m.active == nil { // Failure() cleared it: failure-triggered switch
+			m.failureSwitches++
+		}
 	}
 	m.active, m.activeSince, m.last = c, now, c
 	c.Failures, c.Parked, c.LastError = 0, false, ""
@@ -282,14 +318,14 @@ func (m *Manager) Decide(now time.Time) (*Candidate, string) {
 			if c == a {
 				break
 			}
-			if c.State == health.Available && !c.Parked {
+			if c.State == health.Available && !c.Parked && !now.Before(c.HoldUntil) {
 				return c, "preempt: better-ranked candidate recovered"
 			}
 		}
 	}
 	if m.p.SwitchOnDegraded && a.State == health.Degraded {
 		for _, c := range ranked {
-			if c != a && c.State == health.Available && !c.Parked {
+			if c != a && c.State == health.Available && !c.Parked && !now.Before(c.HoldUntil) {
 				return c, "active carrier degraded"
 			}
 		}
@@ -327,13 +363,16 @@ type Snapshot struct {
 	Active   *Candidate
 	Since    time.Time
 	Switches int
-	All      []Candidate
+	// EndpointSwitches and FailureSwitches are subsets of Switches.
+	EndpointSwitches int
+	FailureSwitches  int
+	All              []Candidate
 }
 
 func (m *Manager) Snapshot() Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s := Snapshot{Since: m.activeSince, Switches: m.switches}
+	s := Snapshot{Since: m.activeSince, Switches: m.switches, EndpointSwitches: m.endpointSwitches, FailureSwitches: m.failureSwitches}
 	if m.active != nil {
 		cp := *m.active
 		s.Active = &cp

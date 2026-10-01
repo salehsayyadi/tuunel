@@ -131,6 +131,7 @@ type Failover struct {
 	RecoverySuccesses int      `yaml:"recovery_successes"`
 	Preempt           *bool    `yaml:"preempt"`
 	SwitchOnDegraded  *bool    `yaml:"switch_on_degraded"`
+	DegradeHoldoff    Duration `yaml:"degrade_holdoff"` // anti-flap hold for a candidate left while DEGRADED (default 1m)
 }
 
 type Forwarding struct {
@@ -152,6 +153,12 @@ type API struct {
 
 type Experimental struct {
 	ICMP bool `yaml:"icmp"`
+	// ICMPReplyFilter controls how an ICMP listener stops the kernel from
+	// echoing tunnel requests back: "auto" (default) installs a narrow
+	// nftables rule that drops only kernel echo replies carrying the tunnel
+	// request magic, leaving normal ping intact; "off" installs nothing (the
+	// tunnel still works, but every request is reflected by the kernel).
+	ICMPReplyFilter string `yaml:"icmp_reply_filter"`
 }
 
 type Log struct {
@@ -163,7 +170,8 @@ var (
 	nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 	hostRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,252})$`)
 	// KnownCarriers lists carrier types accepted in configuration.
-	KnownCarriers = map[string]bool{"tcp": true, "udp": true, "quic": true, "wss": true, "ws": true, "icmp": true}
+	ICMPReplyFilters = map[string]bool{"": true, "auto": true, "off": true}
+	KnownCarriers    = map[string]bool{"tcp": true, "udp": true, "quic": true, "wss": true, "ws": true, "icmp": true}
 )
 
 // Load reads, parses, defaults and validates a configuration file.
@@ -241,6 +249,9 @@ func (c *Config) defaults() {
 	if f.SwitchOnDegraded == nil {
 		f.SwitchOnDegraded = &t
 	}
+	if f.DegradeHoldoff.Duration == 0 {
+		f.DegradeHoldoff.Duration = time.Minute
+	}
 	_ = fl
 	if f.Order == "" {
 		f.Order = "endpoint"
@@ -306,6 +317,9 @@ func ParseKey(s string) ([]byte, error) {
 
 // Validate performs strict semantic validation.
 func (c *Config) Validate() error {
+	if !ICMPReplyFilters[c.Experimental.ICMPReplyFilter] {
+		return fmt.Errorf("config: experimental.icmp_reply_filter: %q must be auto or off", c.Experimental.ICMPReplyFilter)
+	}
 	var errs []string
 	add := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
 	if !nameRe.MatchString(c.Node.ID) {
@@ -445,6 +459,9 @@ func (c *Config) Validate() error {
 	}
 	if f.BackoffInitial.Duration <= 0 || f.BackoffMax.Duration < f.BackoffInitial.Duration {
 		add("failover: backoff_max must be >= backoff_initial > 0")
+	}
+	if f.DegradeHoldoff.Duration < 0 || f.DegradeHoldoff.Duration > time.Hour {
+		add("failover.degrade_holdoff must be between 0 and 1h")
 	}
 	for i, r := range append(append([]Rule{}, c.Forwarding.TCP...), c.Forwarding.UDP...) {
 		if _, _, err := net.SplitHostPort(r.Listen); err != nil {

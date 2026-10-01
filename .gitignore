@@ -1,6 +1,4 @@
 bin/
-*.key
-*.pem
-*.crt
-*.log
-coverage.out
+dist/
+deploy/docker/*/node.key
+tests/lab/__pycache__/

@@ -211,6 +211,9 @@ func (s *Server) Close() {
 	}
 }
 
+// BuildLabels (version, commit, Go version) is set by the daemon at start.
+var BuildLabels [3]string
+
 // Prometheus renders engine metrics in the Prometheus text format.
 func Prometheus(st engine.Status) string {
 	var b strings.Builder
@@ -224,7 +227,7 @@ func Prometheus(st engine.Status) string {
 	lbl := func(p engine.PeerStatus) string {
 		return fmt.Sprintf(`{peer=%q,carrier=%q,endpoint=%q}`, p.Name, p.Carrier, p.Endpoint)
 	}
-	var up, rtt, loss, jit, tx, rx, txp, rxp, rc, upt, drops []string
+	var up, rtt, loss, jit, tx, rx, txp, rxp, rc, upt, drops, sw, esw, fsw, act []string
 	for _, p := range st.Peers {
 		l := lbl(p)
 		v := 0
@@ -241,6 +244,12 @@ func Prometheus(st engine.Status) string {
 		rxp = append(rxp, fmt.Sprintf("tuunel_rx_packets_total{peer=%q} %d", p.Name, p.RxPackets))
 		rc = append(rc, fmt.Sprintf("tuunel_reconnects_total{peer=%q} %d", p.Name, p.Reconnects))
 		upt = append(upt, fmt.Sprintf("tuunel_tunnel_uptime_seconds{peer=%q} %g", p.Name, p.Uptime.Seconds()))
+		sw = append(sw, fmt.Sprintf("tuunel_carrier_switches_total{peer=%q} %d", p.Name, p.CarrierSwitch))
+		esw = append(esw, fmt.Sprintf("tuunel_endpoint_switches_total{peer=%q} %d", p.Name, p.EndpointSw))
+		fsw = append(fsw, fmt.Sprintf("tuunel_failure_switches_total{peer=%q} %d", p.Name, p.FailureSw))
+		if p.Up {
+			act = append(act, fmt.Sprintf("tuunel_active_carrier_info%s 1", l))
+		}
 	}
 	keys := make([]string, 0, len(st.Drops))
 	for k := range st.Drops {
@@ -261,6 +270,13 @@ func Prometheus(st engine.Status) string {
 	w("tuunel_reconnects_total", "Link re-establishments.", "counter", rc...)
 	w("tuunel_tunnel_uptime_seconds", "Current link uptime.", "gauge", upt...)
 	w("tuunel_dropped_packets_total", "Dropped packets by reason.", "counter", drops...)
+	w("tuunel_carrier_switches_total", "Changes of the active endpoint/carrier candidate.", "counter", sw...)
+	w("tuunel_endpoint_switches_total", "Switches that changed the endpoint.", "counter", esw...)
+	w("tuunel_failure_switches_total", "Switches caused by failure of the active candidate.", "counter", fsw...)
+	w("tuunel_active_carrier_info", "Active carrier and endpoint per peer (value 1).", "gauge", act...)
+	if b := BuildLabels; b[0] != "" {
+		w("tuunel_build_info", "Build information (value 1).", "gauge", fmt.Sprintf("tuunel_build_info{version=%q,commit=%q,goversion=%q} 1", b[0], b[1], b[2]))
+	}
 	// Process gauges used by the long-run resource test to detect leaks.
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)

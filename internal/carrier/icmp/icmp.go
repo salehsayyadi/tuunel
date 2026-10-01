@@ -36,6 +36,9 @@ const (
 	protoICMP  = 1
 )
 
+// filterTable is the nftables table owned by an ICMP listener (see filter_linux.go).
+const filterTable = "tuunel_icmp"
+
 var (
 	magicReq = [4]byte{'T', 'U', 'N', 'Q'}
 	magicRep = [4]byte{'T', 'U', 'N', 'R'}

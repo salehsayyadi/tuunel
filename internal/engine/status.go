@@ -43,6 +43,8 @@ type PeerStatus struct {
 	Drops         uint64            `json:"drops"`
 	Reconnects    uint64            `json:"reconnects"`
 	CarrierSwitch int               `json:"carrier_switches"`
+	EndpointSw    int               `json:"endpoint_switches"`
+	FailureSw     int               `json:"failure_switches"`
 	Uptime        time.Duration     `json:"uptime_ns"`
 	AllowedIPs    []string          `json:"allowed_ips"`
 	Candidates    []CandidateStatus `json:"candidates,omitempty"`
@@ -91,6 +93,7 @@ func (e *Engine) Status() Status {
 		}
 		snap := p.mgr.Snapshot()
 		ps.CarrierSwitch = snap.Switches
+		ps.EndpointSw, ps.FailureSw = snap.EndpointSwitches, snap.FailureSwitches
 		for _, c := range snap.All {
 			cs := CandidateStatus{Endpoint: c.Endpoint, Carrier: c.Carrier, Address: c.Address, State: c.State, Failures: c.Failures,
 				LastRTT: c.LastRTT, LastError: c.LastError, Parked: c.Parked, Active: snap.Active != nil && snap.Active.Key() == c.Key() && l != nil}

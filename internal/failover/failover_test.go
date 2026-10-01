@@ -163,4 +163,56 @@ func TestSwitchesCountFailureDrivenSwitch(t *testing.T) {
 	if got := m.Snapshot().Switches; got != 1 {
 		t.Fatalf("switches = %d, want 1", got)
 	}
+	if got := m.Snapshot().FailureSwitches; got != 1 {
+		t.Fatalf("failure switches = %d, want 1", got)
+	}
+	// a preemptive switch back is a switch but not a failure switch
+	m.Connected(cs[0], now, 0)
+	if s := m.Snapshot(); s.Switches != 2 || s.FailureSwitches != 1 {
+		t.Fatalf("after preempt: switches=%d failure=%d", s.Switches, s.FailureSwitches)
+	}
+}
+
+// Anti-flap: a candidate left while DEGRADED is held down (no preemption back
+// to it) for DegradeHoldoff, doubling on repeated degrade departures.
+func TestDegradeHoldoffDampsFlapping(t *testing.T) {
+	p := DefaultPolicy()
+	p.MinHold, p.DegradeHoldoff, p.RecoverySuccesses = time.Second, time.Minute, 1
+	a := &Candidate{Endpoint: "e", Carrier: "udp", CarrierRank: 0}
+	b := &Candidate{Endpoint: "e", Carrier: "quic", CarrierRank: 1}
+	m := New(p, []*Candidate{a, b})
+	now := time.Unix(1000, 0)
+	m.Connected(a, now, time.Millisecond)
+	now = now.Add(2 * time.Second)
+	m.ActiveState(health.Degraded, time.Millisecond, now)
+	m.ProbeResult(b, true, time.Millisecond, now, nil)
+	if c, why := m.Decide(now); c != b {
+		t.Fatalf("want degraded switch to b, got %v %q", c, why)
+	}
+	m.Connected(b, now, time.Millisecond) // left a while DEGRADED
+	if !a.HoldUntil.Equal(now.Add(time.Minute)) {
+		t.Fatalf("hold not set: %v", a.HoldUntil)
+	}
+	m.ProbeResult(a, true, time.Millisecond, now.Add(5*time.Second), nil)
+	if c, _ := m.Decide(now.Add(10 * time.Second)); c != nil {
+		t.Fatalf("preempted back to held candidate %s", c.Key())
+	}
+	if c, _ := m.Decide(now.Add(61 * time.Second)); c != a {
+		t.Fatalf("preempt after hold expected, got %v", c)
+	}
+	// second degrade departure within the streak window doubles the hold
+	now = now.Add(61 * time.Second)
+	m.Connected(a, now, time.Millisecond)
+	now = now.Add(2 * time.Second)
+	m.ActiveState(health.Degraded, time.Millisecond, now)
+	m.ProbeResult(b, true, time.Millisecond, now, nil)
+	m.Connected(b, now, time.Millisecond)
+	if got := a.HoldUntil.Sub(now); got != 2*time.Minute {
+		t.Fatalf("hold should double to 2m, got %v", got)
+	}
+	// a hard failure of the active candidate is never damped
+	m.Failure(b, now.Add(time.Second), nil)
+	if c, _ := m.Pick(now.Add(time.Second)); c == nil {
+		t.Fatal("no candidate after failure")
+	}
 }

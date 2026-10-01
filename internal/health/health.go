@@ -194,8 +194,17 @@ func (t *Tracker) Evaluate(now time.Time) State {
 		t.setLocked(Failed, now)
 		return t.state
 	}
+	// Statistical floor: a single lost probe in the window is noise at low
+	// loss rates (1 of 20 = 5%) and made the tunnel flap between carriers
+	// with the same environmental loss (tests/lab/soak.py). Entering
+	// DEGRADED by loss needs >= 2 lost probes; staying needs >= 1.
+	lost := int(loss*float64(n)/100 + 0.5)
 	bad := func(r float64) bool {
-		return enough && loss >= t.th.DegradedLoss*r ||
+		minLost := 1
+		if r >= 1 {
+			minLost = 2
+		}
+		return enough && loss >= t.th.DegradedLoss*r && lost >= minLost ||
 			t.th.DegradedRTT > 0 && t.haveRTT && float64(avg) >= float64(t.th.DegradedRTT)*r ||
 			t.th.DegradedJitter > 0 && float64(jitter) >= float64(t.th.DegradedJitter)*r
 	}

@@ -20,8 +20,6 @@ import (
 	"github.com/salehsayyadi/tuunel/internal/tun"
 )
 
-var Version = "dev"
-
 func NewLogger(c config.Log) *slog.Logger {
 	var lvl slog.Level
 	_ = lvl.UnmarshalText([]byte(c.Level))
@@ -130,6 +128,8 @@ func Run(configPath string) error {
 			return fmt.Errorf("api token must be at least 16 characters")
 		}
 	}
+	v, c, g := BuildInfo()
+	api.BuildLabels = [3]string{v, c, g}
 	srv := api.New(api.Backend{Engine: eng, Forwarding: fw, MTU: plan.MTU, Interface: dev.Name(), Version: Version,
 		Routes: func() []string { return applied }, RouteErrs: plan.Routes.Errors}, token)
 	if err := srv.ServeUnix(cfg.API.Socket); err != nil {

@@ -137,6 +137,55 @@ func FragmentIPv4(p []byte, mtu int) ([][]byte, error) {
 	return out, nil
 }
 
+// FragmentIPv6 splits an IPv6 packet into IPv6 fragments (RFC 8200 s4.5)
+// whose total length is <= mtu. It implements the "link-specific
+// fragmentation" RFC 8200 s5 requires from links that cannot carry
+// 1280-byte packets: the tunnel ingress fragments, the destination host
+// reassembles. Packets that already carry extension headers (hop-by-hop,
+// routing, destination options, fragment, ...) are refused to keep the
+// unfragmentable part trivially correct; real traffic rarely has them.
+func FragmentIPv6(p []byte, mtu int, id uint32) ([][]byte, error) {
+	if len(p) < IPv6Header || p[0]>>4 != 6 {
+		return nil, errors.New("packet: not IPv6")
+	}
+	switch nh := p[6]; nh {
+	case 0, 43, 44, 60, 51, 50, 135, 139, 140:
+		return nil, fmt.Errorf("packet: refusing to fragment IPv6 with extension header %d", nh)
+	}
+	if len(p) <= mtu {
+		return [][]byte{p}, nil
+	}
+	const fragHdr = 8
+	maxData := (mtu - IPv6Header - fragHdr) &^ 7
+	if maxData < 8 {
+		return nil, errors.New("packet: MTU too small to fragment")
+	}
+	data := p[IPv6Header:]
+	var out [][]byte
+	for off := 0; off < len(data); off += maxData {
+		end := off + maxData
+		last := end >= len(data)
+		if last {
+			end = len(data)
+		}
+		f := make([]byte, IPv6Header+fragHdr+end-off)
+		copy(f, p[:IPv6Header])
+		binary.BigEndian.PutUint16(f[4:6], uint16(fragHdr+end-off))
+		f[6] = 44 // Fragment header
+		f[IPv6Header] = p[6]
+		f[IPv6Header+1] = 0
+		fo := uint16(off/8) << 3
+		if !last {
+			fo |= 1 // M flag
+		}
+		binary.BigEndian.PutUint16(f[IPv6Header+2:IPv6Header+4], fo)
+		binary.BigEndian.PutUint32(f[IPv6Header+4:IPv6Header+8], id)
+		copy(f[IPv6Header+fragHdr:], data[off:end])
+		out = append(out, f)
+	}
+	return out, nil
+}
+
 // TooBig builds an ICMPv4 "fragmentation needed" (type 3 code 4) or ICMPv6
 // "packet too big" (type 2) message from `from` to the original sender.
 // It returns nil when no error should be generated (e.g. the original is

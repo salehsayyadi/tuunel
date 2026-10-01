@@ -2,6 +2,7 @@ package icmp
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,8 @@ type listener struct {
 	conns map[string]*serverConn
 	done  chan struct{}
 	once  sync.Once
+	// filtered is true when this listener installed the nftables reply filter.
+	filtered bool
 }
 
 func (c *Carrier) Listen(ctx context.Context, address string) (carrier.Listener, error) {
@@ -40,6 +43,14 @@ func (c *Carrier) Listen(ctx context.Context, address string) (carrier.Listener,
 	}
 	l := &listener{pc: pc, q: carrier.NewAcceptQueue(32), limit: carrier.NewLimiter(5, 10), max: max,
 		conns: map[string]*serverConn{}, done: make(chan struct{})}
+	if c.opts.ReplyFilter != "off" {
+		if err := installReplyFilter(); err != nil {
+			slog.Warn("icmp: kernel reply filter not installed; the kernel will also answer tunnel requests (doubles downstream traffic). Install nftables or set experimental.icmp_reply_filter: off to silence this", "error", err)
+		} else {
+			l.filtered = true
+			slog.Info("icmp: installed nftables rule dropping kernel echo replies to tunnel requests only", "table", "ip "+filterTable)
+		}
+	}
 	go l.readLoop()
 	go l.reaper()
 	return l, nil
@@ -132,6 +143,11 @@ func (l *listener) Accept(ctx context.Context) (carrier.Conn, error) { return l.
 func (l *listener) Close() error {
 	l.once.Do(func() {
 		close(l.done)
+		if l.filtered {
+			if err := removeReplyFilter(); err != nil {
+				slog.Warn("icmp: removing kernel reply filter failed", "error", err)
+			}
+		}
 		l.q.Close()
 		_ = l.pc.Close()
 		l.mu.Lock()

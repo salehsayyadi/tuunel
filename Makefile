@@ -1,7 +1,8 @@
 GO      ?= go
 BIN     ?= bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -s -w -X github.com/salehsayyadi/tuunel/internal/daemon.Version=$(VERSION)
+COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+LDFLAGS := -s -w -buildid= -X github.com/salehsayyadi/tuunel/internal/daemon.Version=$(VERSION) -X github.com/salehsayyadi/tuunel/internal/daemon.Commit=$(COMMIT)
 
 .PHONY: all build test race vet fmt staticcheck check lab lab-extended soak release bench microbench clean
 
@@ -42,7 +43,6 @@ soak: build
 	sudo bash tests/lab/netns-soak.sh $(CURDIR)/$(BIN) $(SOAK_SECONDS)
 
 # Release archives + installer + SHA256SUMS in dist/.
-VERSION ?= dev
 release:
 	bash scripts/release.sh $(VERSION)
 

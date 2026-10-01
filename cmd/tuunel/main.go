@@ -79,8 +79,8 @@ func main() {
 			fatal(err.Error())
 		}
 		fmt.Println(k)
-	case "version":
-		fmt.Println(daemon.Version)
+	case "version", "-version", "--version":
+		fmt.Println(daemon.VersionString())
 	case "server", "client":
 		legacy(os.Args[1])
 	default:

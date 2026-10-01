@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -364,6 +365,15 @@ func (l *link) probeServe(ctx context.Context) {
 	}
 }
 
+// fragID numbers IPv6 fragments created by the engine (random start).
+var fragID = func() *atomic.Uint32 {
+	var v atomic.Uint32
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	v.Store(binary.BigEndian.Uint32(b[:]))
+	return &v
+}()
+
 // sendIP transmits an inner IP packet, fragmenting or signalling
 // packet-too-big when it exceeds what this link can carry.
 func (l *link) sendIP(pkt []byte) error {
@@ -382,11 +392,30 @@ func (l *link) sendIP(pkt []byte) error {
 			return nil
 		}
 	}
+	v6 := pkt[0]>>4 == 6
+	if v6 && l.limit < packet.MinIPv6MTU && len(pkt) <= packet.MinIPv6MTU {
+		// The link cannot carry the IPv6 minimum MTU and a too-big message
+		// below 1280 is not allowed, so fragment at the tunnel ingress
+		// (RFC 8200 s5 link-specific fragmentation); the destination
+		// reassembles.
+		frags, err := packet.FragmentIPv6(pkt, l.limit, fragID.Add(1))
+		if err == nil {
+			l.e.counters.Fragmented.Add(1)
+			for _, f := range frags {
+				if err := l.send(session.InnerIP, f); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
 	l.e.counters.TooBig.Add(1)
 	mtuv := l.limit
-	v6 := pkt[0]>>4 == 6
 	if v6 && mtuv < packet.MinIPv6MTU {
-		return nil // cannot signal below the IPv6 minimum; drop
+		if len(pkt) <= packet.MinIPv6MTU {
+			return nil // extension headers we refuse to fragment: drop
+		}
+		mtuv = packet.MinIPv6MTU // sender drops to 1280, which is then fragmented
 	}
 	// The ICMP error is injected into the local TUN device, so its source
 	// must not be a local address: Linux drops such packets as martians and

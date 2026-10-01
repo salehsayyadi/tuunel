@@ -1,5 +1,11 @@
 # Final production-readiness audit
 
+> **Historical.** This is the previous audit (published in commit e7fd1d6). It is superseded by
+> [docs/FINAL_VALIDATION.md](docs/FINAL_VALIDATION.md), which re-tests every
+> item and lists the bugs found afterwards (#10–#15: QUIC stream close wedge,
+> carrier flapping, ICMP path-MTU planning, IPv6 over small-MTU links,
+> installer `VERSION` clobbering, ICMP host-ping side effect).
+
 - Repository: `salehsayyadi/tuunel`, branch `main`
 - Baseline commit: `89a4dd7253dea3f7677b345c01f08d2991bd204f`
 - Audit date: 2026-10-01

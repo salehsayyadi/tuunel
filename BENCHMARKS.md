@@ -6,6 +6,22 @@ final build with Go 1.27.1. Two network namespaces are joined by a veth pair
 Internet-path numbers**, and run-to-run variation on this shared VM was large
 (up to ±30 %).
 
+## Final validation build (latest)
+
+`sudo tests/lab/netns-bench.sh BIN 100`, final validation build, same VM:
+
+| Carrier | Goodput | In-tunnel RTT | CPU A / B (s) | RSS A / B |
+|---|---|---|---|---|
+| tcp | 929 Mbit/s | 0.30 ms | 0.75 / 0.67 | 17.3 / 17.1 MB |
+| udp | 898 Mbit/s | 0.29 ms | 0.82 / 0.82 | 17.5 / 17.7 MB |
+| quic (stream) | 552 Mbit/s | 0.46 ms | 1.49 / 1.25 | 18.7 / 18.7 MB |
+| quic (DATAGRAM) | 553 Mbit/s | 0.42 ms | 1.35 / 1.31 | 18.6 / 18.5 MB |
+| wss | 455 Mbit/s | 0.35 ms | 1.50 / 1.83 | 18.3 / 17.8 MB |
+
+Loss/latency/jitter, MTU and failover numbers: [docs/NETWORK-TESTING.md](docs/NETWORK-TESTING.md),
+[docs/FAILOVER.md](docs/FAILOVER.md), [docs/FINAL_VALIDATION.md](docs/FINAL_VALIDATION.md).
+The sections below are from the previous audit.
+
 ## End-to-end through tun0 (`sudo tests/lab/netns-bench.sh bin 100`)
 
 100 MiB inner TCP stream per carrier, measuring in-tunnel RTT (ping) and

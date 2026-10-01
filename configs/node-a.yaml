@@ -57,6 +57,7 @@ failover:
   recovery_successes: 3
   preempt: true              # return to a better candidate once it is stable
   switch_on_degraded: true
+  degrade_holdoff: 1m        # anti-flap: after leaving a DEGRADED candidate, do not return to it for 1m (doubles per repeat, max 32x)
 
 forwarding:
   tcp: []

@@ -51,7 +51,8 @@ func BuildPlan(cfg *config.Config, detectMTU func(string) (int, error)) (*Plan, 
 	f := cfg.Failover
 	ec.Failover = failover.Policy{Order: f.Order, EndpointSelection: f.EndpointSelection, BackoffInitial: f.BackoffInitial.Duration,
 		BackoffMax: f.BackoffMax.Duration, MaxRetries: f.MaxRetries, Cooldown: f.Cooldown.Duration, MinHold: f.MinHold.Duration,
-		RecoverySuccesses: f.RecoverySuccesses, Preempt: *f.Preempt, SwitchOnDegraded: *f.SwitchOnDegraded}
+		RecoverySuccesses: f.RecoverySuccesses, Preempt: *f.Preempt, SwitchOnDegraded: *f.SwitchOnDegraded,
+		DegradeHoldoff: f.DegradeHoldoff.Duration}
 	for _, pf := range cfg.Prefixes() {
 		ec.LocalAddrs = append(ec.LocalAddrs, pf.Addr())
 	}
@@ -64,7 +65,7 @@ func BuildPlan(cfg *config.Config, detectMTU func(string) (int, error)) (*Plan, 
 	}
 	for _, l := range cfg.Listen {
 		c, err := all.New(l.Carrier, carrier.Options{TLSCertFile: l.TLSCertFile, TLSKeyFile: l.TLSKeyFile, Path: l.Path,
-			Datagrams: l.Datagrams, MaxSessions: l.MaxSessions, Experimental: cfg.Experimental.ICMP, Plain: l.Carrier == "ws"})
+			Datagrams: l.Datagrams, MaxSessions: l.MaxSessions, Experimental: cfg.Experimental.ICMP, ReplyFilter: cfg.Experimental.ICMPReplyFilter, Plain: l.Carrier == "ws"})
 		if err != nil {
 			return nil, err
 		}
@@ -106,9 +107,11 @@ func BuildPlan(cfg *config.Config, detectMTU func(string) (int, error)) (*Plan, 
 				addr := e.Address
 				if cc.Type != "icmp" {
 					addr = net.JoinHostPort(e.Address, strconv.Itoa(cc.Port))
-					if firstDial == "" {
-						firstDial = addr
-					}
+				}
+				if firstDial == "" {
+					// ICMP has no port; path MTU detection only needs the host
+					// (connected UDP socket + IP_MTU, nothing is sent).
+					firstDial = net.JoinHostPort(e.Address, strconv.Itoa(max(cc.Port, 9)))
 				}
 				ep.Candidates = append(ep.Candidates, engine.CandidateConfig{Endpoint: e.Name, EndpointRank: rank, Carrier: c, CarrierRank: ci, Address: addr})
 				addCaps(c)

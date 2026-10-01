@@ -104,7 +104,7 @@ func (c *conn) WriteMessage(b []byte) error {
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	ctx, cancel := context.WithTimeout(c.ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, carrier.StreamWriteTimeout)
 	defer cancel()
 	return c.c.Write(ctx, ws.MessageBinary, b)
 }

@@ -1,14 +1,46 @@
-# Failover lab. Needs a privileged container (netns, veth, TUN, iptables, tc).
-# Loss/latency steps need sch_netem and xt_statistic in the *host* kernel.
-#   docker compose run --rm lab
-#   docker compose run --rm bench
+# tuunel with Docker Compose.
+#
+# Production: run ONE service per host (edge on the public node, remote on the
+# other) with network_mode: host so tun0 and the carrier ports live on the
+# host. Put config.yaml + node.key into ./deploy/docker/<role>/ first
+# (see docs/INSTALL.md, "Docker"):
+#   docker compose up -d edge        # on the edge host
+#   docker compose up -d remote      # on the remote host
+#
+# Lab (privileged, netns based):     docker compose --profile lab run --rm lab
+x-tuunel: &tuunel
+  build: { context: ., target: runtime }
+  image: tuunel:latest
+  restart: unless-stopped
+  network_mode: host
+  cap_drop: [ALL]
+  cap_add: [NET_ADMIN, NET_RAW, NET_BIND_SERVICE]
+  devices: ["/dev/net/tun:/dev/net/tun"]
+  read_only: true
+  tmpfs: ["/run/tuunel:uid=10001,gid=10001,mode=0750", "/tmp"]
+  stop_signal: SIGTERM
+  stop_grace_period: 15s
+  logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
 services:
+  edge:
+    <<: *tuunel
+    container_name: tuunel-edge
+    volumes: ["./deploy/docker/edge:/etc/tuunel:ro"]
+    profiles: [edge]
+  remote:
+    <<: *tuunel
+    container_name: tuunel-remote
+    volumes: ["./deploy/docker/remote:/etc/tuunel:ro"]
+    profiles: [remote]
   lab:
     build: { context: ., target: lab }
     privileged: true
     devices: ["/dev/net/tun:/dev/net/tun"]
+    profiles: [lab]
   bench:
     build: { context: ., target: lab }
     privileged: true
     devices: ["/dev/net/tun:/dev/net/tun"]
     entrypoint: ["/lab/netns-bench.sh", "/usr/local/bin", "50"]
+    profiles: [lab]

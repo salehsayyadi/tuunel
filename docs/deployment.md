@@ -32,8 +32,9 @@ and run `sudo systemctl reload tuunel`.
 The installer's generated edge and remote configs were validated with
 `tuunel check` and run against each other in the network-namespace lab
 (non-root, capabilities only: tunnel up, ping, all 4 carriers OK, TCP→QUIC
-failover). The installer itself was **not** executed on a systemd host. See
-FINAL_AUDIT.md.
+failover). The installer itself was executed in `--root` mode and through
+an HTTPS one-line install, but **not** on a live systemd host. See
+[FINAL_VALIDATION.md](FINAL_VALIDATION.md).
 
 ## Manual configuration
 

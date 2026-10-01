@@ -64,6 +64,11 @@ func (c *Carrier) Dial(ctx context.Context, address string) (carrier.Conn, error
 	}
 	qc, err := quicgo.DialAddr(ctx, address, tlsConf, c.config())
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Most common causes: UDP filtered, or a path MTU below the 1200-byte
+			// datagrams QUIC requires (underlay MTU >= 1228 IPv4 / 1248 IPv6).
+			return nil, fmt.Errorf("%w (no QUIC handshake: UDP blocked or path MTU < 1228/1248?)", err)
+		}
 		return nil, err
 	}
 	if c.opts.Datagrams {
@@ -86,9 +91,16 @@ type streamRWC struct {
 	qc *quicgo.Conn
 }
 
+// Close aborts both stream directions before closing the connection.
+// CancelWrite (not the graceful Stream.Close) is required: a Write that is
+// blocked on flow control / congestion of a dead path is only woken by
+// CancelWrite or a deadline. With Stream.Close() first, quic-go left such a
+// Write blocked forever after the connection closed, which wedged the
+// engine's per-peer sender on the dead link and stopped all traffic after
+// failover (found by tests/lab/failover.py, QUIC blocked under load).
 func (s streamRWC) Close() error {
+	s.Stream.CancelWrite(0)
 	s.Stream.CancelRead(0)
-	_ = s.Stream.Close()
 	return s.qc.CloseWithError(0, "closed")
 }
 
