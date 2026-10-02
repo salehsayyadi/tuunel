@@ -240,6 +240,13 @@ kernel has no nftables NAT, so the remote's masquerade itself was not
 exercised there (the test routes the tunnel subnet back instead); it must be
 confirmed on a real host with `curl -4 ifconfig.me` on the edge.
 
+### REAL_TWO_SERVER_TEST: speed (v0.9.4)
+
+Real deployment, Iran edge ↔ Hetzner Helsinki, ~87 ms RTT, before v0.9.4:
+- raw path without the tunnel (iperf3, Hetzner→Iran): 1 flow ~135 Mbit/s with 68k retransmits in 10 s (policer-like loss), 8 flows 175-235 Mbit/s; Iran domestic 7.8 Gbit/s, so the international path is the bottleneck.
+- through the tunnel (tcp carrier, v0.9.3, after manual BBR/fq tuning): Speedtest download 61 Mbit/s, upload 138 Mbit/s, loaded latency up to 630-1400 ms (bufferbloat).
+v0.9.4 targets exactly this: multi-stream tcp, bounded queueing, BBR on carrier sockets, installer tuning. Lab (same host, no impairment): tcp carrier 381 → 714 Mbit/s single flow. Real-path results after the upgrade: pending user measurement.
+
 ### RESTRICTED_NETWORK_TEST: BLOCKED
 
 Reason: no authorized restricted/filtered network was available. No claim

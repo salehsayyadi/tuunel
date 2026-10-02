@@ -268,3 +268,53 @@ func pseudo6(src, dst []byte, length int, next byte) uint32 {
 	sum += uint32(next)
 	return sum
 }
+
+// FlowHash returns a hash of the packet's flow identity: addresses, protocol
+// and, for unfragmented TCP/UDP/SCTP, ports. Packets of one transport flow
+// always hash alike, so a multi-stream carrier keeps each flow on one
+// connection and never reorders it. Fragments hash without ports (non-first
+// fragments carry none) so all fragments of a datagram stay together.
+func FlowHash(p []byte) uint32 {
+	h := uint32(2166136261)
+	mix := func(b []byte) {
+		for _, c := range b {
+			h ^= uint32(c)
+			h *= 16777619
+		}
+	}
+	if len(p) < 1 {
+		return 0
+	}
+	var proto byte
+	var l4 []byte
+	switch p[0] >> 4 {
+	case 4:
+		if len(p) < 20 {
+			return 0
+		}
+		ihl := int(p[0]&0x0f) * 4
+		proto = p[9]
+		mix(p[12:20])
+		frag := binary.BigEndian.Uint16(p[6:8])&0x3fff != 0
+		if !frag && ihl >= 20 && len(p) >= ihl+4 {
+			l4 = p[ihl : ihl+4]
+		}
+	case 6:
+		if len(p) < 40 {
+			return 0
+		}
+		proto = p[6]
+		mix(p[8:40])
+		if len(p) >= 44 {
+			l4 = p[40:44]
+		}
+	default:
+		return 0
+	}
+	mix([]byte{proto})
+	if proto == 6 || proto == 17 || proto == 132 {
+		mix(l4)
+	}
+	h ^= h >> 16
+	return h
+}

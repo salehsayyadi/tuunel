@@ -14,16 +14,16 @@ func TestReplayWindow(t *testing.T) {
 			t.Fatalf("duplicate %d accepted", n)
 		}
 	}
-	if !w.Update(10000) {
+	if !w.Update(100000) {
 		t.Fatal("jump rejected")
 	}
-	if w.Update(10000 - windowSize) {
+	if w.Update(100000 - windowSize) {
 		t.Fatal("too-old counter accepted")
 	}
-	if !w.Update(10000 - windowSize + 1) {
+	if !w.Update(100000 - windowSize + 1) {
 		t.Fatal("in-window counter rejected")
 	}
-	if !w.Update(9999) || w.Update(9999) {
+	if !w.Update(99999) || w.Update(99999) {
 		t.Fatal("window bookkeeping wrong")
 	}
 }

@@ -10,7 +10,11 @@ type ReplayWindow struct {
 }
 
 const (
-	windowWords = 32                  // 2048-bit ring
+	// 64 Ki-message ring (8 KiB per session). Multi-stream carriers deliver
+	// messages of one session over several connections, so a stalled
+	// connection can fall tens of thousands of messages behind its siblings
+	// at high packet rates; a 2048-message window would discard its backlog.
+	windowWords = 1024
 	windowSize  = windowWords*64 - 64 // usable window, one word kept as slack
 )
 

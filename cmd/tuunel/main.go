@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"syscall"
 
 	"github.com/salehsayyadi/tuunel/internal/config"
@@ -29,6 +30,12 @@ func main() {
 		fs := flag.NewFlagSet("run", flag.ExitOnError)
 		cfg := fs.String("config", "/etc/tuunel/config.yaml", "configuration file")
 		_ = fs.Parse(os.Args[2:])
+		if pf := os.Getenv("TUUNEL_CPUPROFILE"); pf != "" { // development: CPU profile of the daemon
+			if f, err := os.Create(pf); err == nil {
+				_ = pprof.StartCPUProfile(f)
+				defer pprof.StopCPUProfile()
+			}
+		}
 		if err := daemon.Run(*cfg); err != nil {
 			fatal(err.Error())
 		}

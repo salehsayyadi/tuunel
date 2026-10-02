@@ -31,7 +31,7 @@ type Plan struct {
 
 func carrierFor(cfg *config.Config, c config.Carrier) (carrier.Carrier, error) {
 	return all.New(c.Type, carrier.Options{Path: c.Path, Host: c.Host, TLSServerName: c.TLSServerName, TLSCAFile: c.TLSCAFile,
-		Datagrams: c.Datagrams, Experimental: cfg.Experimental.ICMP})
+		Datagrams: c.Datagrams, Streams: c.Streams, Experimental: cfg.Experimental.ICMP})
 }
 
 // BuildPlan converts configuration into an engine configuration. It performs

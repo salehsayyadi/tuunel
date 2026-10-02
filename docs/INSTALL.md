@@ -27,6 +27,14 @@ curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/insta
 Releases are built by `.github/workflows/release.yml` whenever `VERSION`
 changes on `main`. A specific release: `.../releases/download/v0.9.0/install.sh`.
 
+## Speed tuning (v0.9.4+)
+
+- The installer applies system-wide network tuning unless `--no-tune`: BBR congestion control (when the kernel has it) with the fq qdisc, 64 MiB socket buffer limits, `tcp_mtu_probing=1`, `tcp_slow_start_after_idle=0` (`/etc/sysctl.d/90-tuunel.conf`, removed by `--uninstall`).
+- TCP carrier sockets request BBR, `TCP_NOTSENT_LOWAT` (128 KiB) and `TCP_USER_TIMEOUT` (20 s).
+- Multi-stream TCP: `{type: tcp, port: N, streams: 4}` on the dialing (remote) side opens 4 TCP connections per link. Inner flows are pinned to one member by a 5-tuple hash (no reordering inside a flow), so one loss stalls only that member (less TCP-over-TCP head-of-line blocking) and per-connection throttling is multiplied. Listeners accept classic and multi-stream dialers on the same port; the edge must run v0.9.4+. New remote configs get `streams: 4`; `--streams=N` sets it on an existing remote config.
+- Stream carriers batch writes (one syscall per burst) and buffer reads; data packets are dropped instead of queued once ~192 KiB is pending, keeping the tunnel's own queueing delay low.
+- The anti-replay window is 65 472 messages (was 1 984) so delayed members of a multi-stream link are not discarded.
+
 ## Route-all mode: the edge as a pure relay (v0.9.3+)
 
 `--route-all` on both nodes adds `exit: {mode: client}` (edge) and

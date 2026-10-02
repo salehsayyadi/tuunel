@@ -119,6 +119,26 @@ func (l *link) send(inner byte, body []byte) error {
 	return l.conn.WriteMessage(msg)
 }
 
+// sendData seals an inner IP packet and hands it to the carrier as a data
+// message of the given flow (see carrier.FlowWriter).
+func (l *link) sendData(body []byte, flow uint32) error {
+	fw, ok := l.conn.(carrier.FlowWriter)
+	if !ok {
+		return l.send(session.InnerIP, body)
+	}
+	l.mu.Lock()
+	s := l.cur
+	l.mu.Unlock()
+	if s == nil {
+		return errors.New("no session")
+	}
+	msg, err := s.Seal(make([]byte, 0, session.DataHeaderLen+1+len(body)+16), session.InnerIP, body)
+	if err != nil {
+		return err
+	}
+	return fw.WriteMessageFlow(msg, flow)
+}
+
 func (l *link) sendPing(pad int) error {
 	id := l.pingSeq.Add(1)
 	if pad > maxPingBody-8 {
@@ -377,15 +397,16 @@ var fragID = func() *atomic.Uint32 {
 // sendIP transmits an inner IP packet, fragmenting or signalling
 // packet-too-big when it exceeds what this link can carry.
 func (l *link) sendIP(pkt []byte) error {
+	flow := packet.FlowHash(pkt)
 	if len(pkt) <= l.limit {
-		return l.send(session.InnerIP, pkt)
+		return l.sendData(pkt, flow)
 	}
 	if pkt[0]>>4 == 4 && !packet.DontFragment(pkt) {
 		frags, err := packet.FragmentIPv4(pkt, l.limit)
 		if err == nil {
 			l.e.counters.Fragmented.Add(1)
 			for _, f := range frags {
-				if err := l.send(session.InnerIP, f); err != nil {
+				if err := l.sendData(f, flow); err != nil {
 					return err
 				}
 			}
@@ -402,7 +423,7 @@ func (l *link) sendIP(pkt []byte) error {
 		if err == nil {
 			l.e.counters.Fragmented.Add(1)
 			for _, f := range frags {
-				if err := l.send(session.InnerIP, f); err != nil {
+				if err := l.sendData(f, flow); err != nil {
 					return err
 				}
 			}

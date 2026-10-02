@@ -105,6 +105,7 @@ type Carrier struct {
 	TLSServerName string `yaml:"tls_server_name"`
 	TLSCAFile     string `yaml:"tls_ca_file"`
 	Datagrams     bool   `yaml:"datagrams"`
+	Streams       int    `yaml:"streams"` // tcp: parallel connections per link (dialer side)
 }
 
 type Health struct {
@@ -464,6 +465,9 @@ func (c *Config) Validate() error {
 			}
 			if cr.Type != "icmp" && (cr.Port < 1 || cr.Port > 65535) {
 				add("peers[%d].carriers[%d].port must be 1-65535", i, j)
+			}
+			if cr.Streams < 0 || cr.Streams > 16 || (cr.Streams > 1 && cr.Type != "tcp") {
+				add("peers[%d].carriers[%d].streams must be 1-16 and is supported by tcp only", i, j)
 			}
 			if cr.Path != "" && (!strings.HasPrefix(cr.Path, "/") || strings.ContainsAny(cr.Path, " \r\n?#")) {
 				add("peers[%d].carriers[%d].path invalid", i, j)

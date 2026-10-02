@@ -49,6 +49,20 @@ type Conn interface {
 	RemoteAddr() net.Addr
 }
 
+// FlowWriter is implemented by connections that treat data packets
+// specially. WriteMessageFlow sends a data message belonging to the inner
+// flow identified by flow (see packet.FlowHash): multi-stream connections pick
+// a sub-connection by flow, and stream connections drop the message (ErrBusy)
+// instead of blocking when their send queue is full, which keeps queueing
+// delay low and lets the inner transport see congestion. Control messages
+// keep using WriteMessage.
+type FlowWriter interface {
+	WriteMessageFlow(b []byte, flow uint32) error
+}
+
+// ErrBusy reports a data message dropped because the send queue is full.
+var ErrBusy = errors.New("carrier: send queue full")
+
 // Listener accepts inbound carrier connections.
 type Listener interface {
 	Accept(ctx context.Context) (Conn, error)
@@ -82,4 +96,5 @@ type Options struct {
 	MaxSessions   int    // listener-side limit on concurrent remote sessions
 	Experimental  bool   // administrator enablement for experimental carriers
 	ReplyFilter   string // ICMP listener: "auto" (nftables rule) or "off"
+	Streams       int    // TCP dialer: parallel connections per link (1 = classic single stream)
 }

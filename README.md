@@ -239,6 +239,30 @@ sudo systemctl reload tuunel
 
 ---
 
+## سرعت بیشتر (v0.9.4+)
+
+نصب‌کننده از این نسخه به‌طور خودکار:
+- **BBR + fq** و بافرهای بزرگ شبکه را روی سرور فعال می‌کند (`/etc/sysctl.d/90-tuunel.conf`). روی مسیرهای طولانی و پر از loss ایران↔خارج سرعت را خیلی بالا می‌برد. اگر نمی‌خواهید: `--no-tune`.
+- برای پروتکل tcp روی سرور خارج **۴ اتصال موازی** (`streams: 4`) می‌سازد. هر جریان (مثلاً هر دانلود) روی یک اتصال می‌ماند و یک loss فقط بخشی از ترافیک را معطل می‌کند، نه همه را.
+- صف داخلی تونل کوچک است تا پینگ زیر بار بالا نرود (bufferbloat کمتر).
+
+ارتقای نصب فعلی (اول سرور **ایران**، بعد سرور **خارج**):
+```bash
+# ایران
+curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/install.sh | sudo bash
+# خارج (۴ اتصال موازی را به کانفیگ فعلی اضافه می‌کند)
+curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/install.sh | sudo bash -s -- --streams=4
+```
+
+تست سرعت روی سرور ایران از داخل تونل (وقتی route-all روشن است):
+```bash
+curl -sL https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz | sudo tar xz -C /usr/local/bin speedtest
+speedtest --accept-license --accept-gdpr
+```
+سقف واقعی را مسیر بین دو سرور تعیین می‌کند؛ برای سنجش آن بدون تونل: روی خارج `iperf3 -s` و روی ایران `iperf3 -c IP_KHAREJ -B IP_IRAN -R -P 8`.
+
+---
+
 ## دستورات کاربردی
 
 | کار | دستور |

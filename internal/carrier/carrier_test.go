@@ -13,21 +13,51 @@ type rwc struct{ bytes.Buffer }
 func (*rwc) Close() error { return nil }
 
 func TestStreamFraming(t *testing.T) {
-	var b rwc
-	c := NewStreamConn(&b, nil, nil)
-	for _, m := range [][]byte{[]byte("a"), bytes.Repeat([]byte{7}, 1500)} {
-		if err := c.WriteMessage(m); err != nil {
-			t.Fatal(err)
+	x, y := net.Pipe()
+	w, r := NewStreamConn(x, nil, nil), NewStreamConn(y, nil, nil)
+	defer w.Close()
+	defer r.Close()
+	msgs := [][]byte{[]byte("a"), bytes.Repeat([]byte{7}, 1500)}
+	for i := 0; i < 2000; i++ { // many frames: exercises write coalescing and buffered reads
+		msgs = append(msgs, bytes.Repeat([]byte{byte(i)}, 1+i%1400))
+	}
+	go func() {
+		for _, m := range msgs {
+			if err := w.WriteMessage(m); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	buf := make([]byte, 2000)
+	for i, m := range msgs {
+		r.rw.(net.Conn).SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := r.ReadMessage(buf)
+		if err != nil || !bytes.Equal(buf[:n], m) {
+			t.Fatalf("frame %d: got %d bytes %v", i, n, err)
 		}
 	}
-	buf := make([]byte, 2000)
-	n, err := c.ReadMessage(buf)
-	if err != nil || string(buf[:n]) != "a" {
-		t.Fatalf("got %q %v", buf[:n], err)
-	}
-	n, err = c.ReadMessage(buf)
-	if err != nil || n != 1500 {
-		t.Fatalf("got %d %v", n, err)
+}
+
+func TestStreamCloseUnblocksFullWriter(t *testing.T) {
+	x, y := net.Pipe() // nobody reads y: the writer blocks once pending is full
+	defer y.Close()
+	w := NewStreamConn(x, nil, nil)
+	done := make(chan error, 1)
+	go func() {
+		for {
+			if err := w.WriteMessage(make([]byte, 1400)); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	w.Close()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("WriteMessage still blocked after Close")
 	}
 }
 

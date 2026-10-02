@@ -50,6 +50,14 @@ with SOCKS5 or HTTP proxy settings and their traffic leaves from the remote:
 e.g. 3x-ui / Pasarguard / apt, reaches the internet through the remote):
   --route-all            enable on BOTH nodes (adds exit: to new or existing configs)
   --route-all=off        disable again (removes the exit: line)
+Speed:
+  --streams=N            remote: parallel TCP connections for the tcp carrier
+                         (1-16, default 4 for new configs; also updates an
+                         existing remote config). Needs v0.9.4+ on the edge.
+  --no-tune              do not apply the network tuning below
+  By default the installer enables BBR congestion control + fq and larger
+  socket buffers system-wide (/etc/sysctl.d/90-tuunel.conf); this raises
+  throughput on long, lossy international paths a lot. --uninstall removes it.
   --binary-dir=DIR       use prebuilt tuunel/tunnelctl from DIR
   --url=BASE_URL         download BASE_URL/tuunel-linux-ARCH.tar.gz + BASE_URL/SHA256SUMS
   --version=VERSION      with an embedded release base URL: install that release
@@ -72,7 +80,7 @@ EOF
 }
 ROLE=""; PEER_KEY=""; EDGE_ADDR=""; LOCAL_IP=""; PEER_IP=""; PORTS="tcp=443,quic=443,wss=8443,udp=51900"
 BIN_DIR=""; URL=""; START=1; FORCE=0; UNINSTALL=0; PURGE=0
-ROUTE_ALL=""; PROXY=default; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""
+ROUTE_ALL=""; STREAMS=""; TUNE=1; PROXY=default; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""
 REL_VERSION=""; SIGNING_KEY=""; REQUIRE_SIG=0; CA_FILE=""; SYSTEMD=1; ROOT=""
 arg() { printf '%s' "${1#*=}"; }
 while [ $# -gt 0 ]; do
@@ -83,6 +91,7 @@ while [ $# -gt 0 ]; do
     --local-ip=*) LOCAL_IP=$(arg "$1");; --peer-ip=*) PEER_IP=$(arg "$1");;
     --ports=*) PORTS=$(arg "$1");;
     --proxy) PROXY=add;; --no-proxy) PROXY=no;;
+    --streams=*) STREAMS=${1#*=};; --no-tune) TUNE=0;;
     --route-all) ROUTE_ALL=on;; --route-all=on) ROUTE_ALL=on;; --route-all=off) ROUTE_ALL=off;;
     --proxy-port=*) PROXY_PORT=$(arg "$1");; --proxy-user=*) PROXY_USER=$(arg "$1");; --proxy-pass=*) PROXY_PASS=$(arg "$1");;
     --binary-dir=*) BIN_DIR=$(arg "$1");; --binary-dir) BIN_DIR=$2; shift;;
@@ -133,6 +142,10 @@ if [ "$UNINSTALL" = 1 ]; then
   say "uninstalling tuunel"
   sc disable --now tuunel >/dev/null 2>&1 || true
   rm -f "$UNIT" "$BINDIR/tuunel" "$BINDIR/tunnelctl"
+  if [ -z "$ROOT" ] && [ -f /etc/sysctl.d/90-tuunel.conf ]; then
+    rm -f /etc/sysctl.d/90-tuunel.conf /etc/modules-load.d/tuunel.conf
+    say "removed network tuning (/etc/sysctl.d/90-tuunel.conf); kernel defaults return after reboot"
+  fi
   sc daemon-reload || true
   if [ "$PURGE" = 1 ]; then
     rm -rf "$ETC" "$STATE"
@@ -153,6 +166,7 @@ done
 for v in "$PROXY_USER" "$PROXY_PASS"; do
   [ -z "$v" ] || printf '%s' "$v" | grep -Eq '^[A-Za-z0-9._~-]{1,64}$' || die "--proxy-user/--proxy-pass: use 1-64 characters from A-Z a-z 0-9 . _ ~ -"
 done
+[ -z "$STREAMS" ] || { printf '%s' "$STREAMS" | grep -Eq '^[0-9]{1,2}$' && [ "$STREAMS" -ge 1 ] && [ "$STREAMS" -le 16 ]; } || die "--streams must be 1-16"
 [ -z "$PEER_KEY" ] || printf '%s' "$PEER_KEY" | grep -Eq '^[A-Za-z0-9+/]{43}=$' || die "--peer-key must be a 44-character base64 public key (tuunel pubkey)"
 say "host: $OSNAME, arch $ARCH"
 
@@ -271,6 +285,7 @@ carrier_lines() {   # $1 = edge|remote; emitted in --ports order (= preference o
   for kv in ${PORTS//,/ }; do
     k=${kv%%=*}; v=${kv#*=}
     if [ "$1" = edge ]; then printf '  - {carrier: %-5s address: "0.0.0.0:%s"}\n' "$k," "$v"
+    elif [ "$k" = tcp ] && [ "${STREAMS:-4}" -gt 1 ]; then printf '      - {type: %-5s port: %s, streams: %s}   # streams: parallel TCP connections\n' "$k," "$v" "${STREAMS:-4}"
     else printf '      - {type: %-5s port: %s}\n' "$k," "$v"; fi
   done
 }
@@ -332,6 +347,11 @@ if [ -f "$CFG" ] && [ "$FORCE" = 0 ]; then
   elif [ -n "$PROXY_PORT" ] && grep -q '^proxy: {listen: "0.0.0.0:' "$CFG"; then
     sed -i -E "s#^proxy: \{listen: \"0.0.0.0:[0-9]+\"#proxy: {listen: \"0.0.0.0:$PROXY_PORT\"#" "$CFG"; echo "    proxy port set to $PROXY_PORT"
   fi
+  if [ -n "$STREAMS" ] && ! grep -q '^listen:' "$CFG" && grep -Eq '^ *- *\{ *type: *tcp *,' "$CFG"; then
+    cp -p "$CFG" "$CFG.bak.$(date +%Y%m%d%H%M%S)"
+    sed -i -E '/^ *- *\{ *type: *tcp *,/{s/, *streams: *[0-9]+//; s/\}/, streams: '"$STREAMS"'}/}' "$CFG"
+    echo "    tcp carrier: streams set to $STREAMS"
+  fi
   if [ "$ROUTE_ALL" = on ] && ! grep -q '^exit:' "$CFG"; then
     cp -p "$CFG" "$CFG.bak.$(date +%Y%m%d%H%M%S)"
     if grep -q '^listen:' "$CFG"; then echo "exit: {mode: client}   # route all: outbound traffic of this server leaves through the remote" >>"$CFG"
@@ -358,6 +378,28 @@ say "6/8 capabilities"
 if [ -n "$ROOT" ]; then echo "    skipped (--root)"
 elif command -v setcap >/dev/null; then setcap 'cap_net_admin,cap_net_raw,cap_net_bind_service+ep' "$BINDIR/tuunel" || warn "setcap failed (systemd AmbientCapabilities still apply)"
 else echo "    setcap not installed (only needed to run tuunel outside systemd)"; fi
+
+if [ -n "$ROOT" ] || [ "$TUNE" = 0 ]; then echo "    network tuning: skipped"
+else
+  cc=cubic
+  { modprobe tcp_bbr 2>/dev/null || true; }
+  grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null && cc=bbr
+  [ "$cc" = bbr ] && echo tcp_bbr >/etc/modules-load.d/tuunel.conf
+  cat >/etc/sysctl.d/90-tuunel.conf <<SYSCTL
+# tuunel network tuning (install.sh; remove with --uninstall, skip with --no-tune)
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=$cc
+net.core.rmem_max=67108864
+net.core.wmem_max=67108864
+net.ipv4.tcp_rmem=4096 131072 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+net.core.netdev_max_backlog=16384
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_slow_start_after_idle=0
+SYSCTL
+  if sysctl -q -p /etc/sysctl.d/90-tuunel.conf >/dev/null 2>&1; then echo "    network tuning: $cc + fq, 64 MiB socket buffers (/etc/sysctl.d/90-tuunel.conf)"
+  else warn "some network tuning values were not accepted by this kernel (see sysctl -p /etc/sysctl.d/90-tuunel.conf)"; fi
+fi
 
 say "7/8 validating configuration"
 VALID=0
