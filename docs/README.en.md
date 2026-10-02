@@ -240,12 +240,12 @@ Port forwarding (`forwarding.tcp` / `forwarding.udp`, e.g. `0.0.0.0:2222 →
 
 ```bash
 make check                                  # gofmt, vet, test, race, staticcheck
-sudo scripts/test-network-impairment.sh     # loss/latency/jitter (FULL=1 for all carriers)
-sudo scripts/test-failover.sh               # carrier/endpoint failover, reverse (FULL=1)
-sudo scripts/test-mtu.sh                    # MTU sweep (FULL=1)
-sudo SOAK_SECONDS=1800 scripts/test-soak.sh # soak
-sudo scripts/test-install.sh                # installer, release, one-line install
-scripts/test-docker.sh                      # needs a Docker daemon
+sudo bash scripts/test-network-impairment.sh     # loss/latency/jitter (FULL=1 for all carriers)
+sudo bash scripts/test-failover.sh               # carrier/endpoint failover, reverse (FULL=1)
+sudo bash scripts/test-mtu.sh                    # MTU sweep (FULL=1)
+sudo SOAK_SECONDS=1800 bash scripts/test-soak.sh # soak
+sudo bash scripts/test-install.sh                # installer, release, one-line install
+bash scripts/test-docker.sh                      # needs a Docker daemon
 make release VERSION=v1.0.0                 # reproducible linux/amd64 + arm64
 ```
 

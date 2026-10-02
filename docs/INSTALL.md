@@ -178,7 +178,7 @@ docker exec tsd bash -c 'cd /src && make build && scripts/test-install.sh --syst
 docker rm -f tsd
 ```
 
-or on a disposable VM: `sudo scripts/test-install.sh --systemd`.
+or on a disposable VM: `sudo bash scripts/test-install.sh --systemd`.
 
 ## 8. Uninstall
 

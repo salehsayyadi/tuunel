@@ -7,7 +7,7 @@ name: release
 on:
   push:
     branches: [main]
-    paths: [VERSION]
+    paths: [VERSION, .github/workflows/release.yml]
   workflow_dispatch:
 permissions:
   contents: write
@@ -26,7 +26,7 @@ jobs:
         run: |
           V=$(tr -d ' \n' < VERSION)
           echo "V=$V" >> "$GITHUB_ENV"
-          RELEASE_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download" scripts/release.sh "$V" dist
+          RELEASE_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download" bash scripts/release.sh "$V" dist
       - name: publish
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |

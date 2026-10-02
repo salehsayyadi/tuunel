@@ -90,8 +90,8 @@ go test -count=1 ./... ; go test -race -count=1 ./...
 go test -run='^$' -fuzz=FuzzValidate -fuzztime=60s ./internal/packet
 go test -run='^$' -fuzz=FuzzOpen -fuzztime=60s ./internal/session
 systemd-analyze verify --root=R /etc/systemd/system/tuunel.service ; systemd-analyze security --offline=yes --root=R tuunel.service
-sudo scripts/test-install.sh                                    # 34/0
-scripts/test-docker.sh                                          # exit 3 NOT TESTABLE
+sudo bash scripts/test-install.sh                                    # 34/0
+bash scripts/test-docker.sh                                          # exit 3 NOT TESTABLE
 sudo TUUNEL_BIN=BIN python3 tests/lab/impair.py  results/impair-final.json
 sudo TUUNEL_BIN=BIN python3 tests/lab/mtu.py     results/mtu.json
 sudo TUUNEL_BIN=BIN CYCLES=3 python3 tests/lab/failover.py results/failover.json
@@ -100,7 +100,7 @@ sudo TUUNEL_BIN=BIN python3 tests/lab/metrics_check.py results/metrics.json
 sudo TUUNEL_BIN=BIN OLD_BIN=OLDBIN python3 tests/lab/compat.py results/compat.json
 sudo TUUNEL_BIN=BIN python3 tests/lab/nonroot.py ; sudo TUUNEL_BIN=BIN python3 tests/lab/icmp_check.py
 sudo tests/lab/netns-bench.sh BIN 100
-sudo scripts/test-network-impairment.sh ; sudo scripts/test-failover.sh ; sudo scripts/test-mtu.sh ; sudo scripts/test-soak.sh
+sudo bash scripts/test-network-impairment.sh ; sudo bash scripts/test-failover.sh ; sudo bash scripts/test-mtu.sh ; sudo bash scripts/test-soak.sh
 ```
 
 ## Soak
@@ -183,7 +183,7 @@ Reason: no Docker daemon in the VM; starting `dockerd` was not permitted.
 Procedure (any host with Docker ≥ 24 and `/dev/net/tun`):
 
 ```bash
-scripts/test-docker.sh      # compose config, image build (vet+test), uid 10001, healthcheck,
+bash scripts/test-docker.sh      # compose config, image build (vet+test), uid 10001, healthcheck,
                             # edge+remote containers on a bridge network, ping through the
                             # tunnel, health=healthy, tcp blocked -> udp failover, SIGTERM stop
 docker compose --profile edge up -d && docker compose ps     # host -> container deployment
