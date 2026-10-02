@@ -287,7 +287,9 @@ VALID=0
 if [ -f "$CFG" ]; then
   if [ -z "$ROOT" ]; then chk=(timeout 30 runuser -u tuunel -- "$BINDIR/tuunel" check -config "$CFG")
   else chk=(timeout 30 "$BINDIR/tuunel" check -config "$CFG"); fi
-  if out=$("${chk[@]}" 2>&1); then VALID=1; echo "    $out"
+  if grep -qs REPLACE_ME "$CFG"; then
+    echo "    waiting for the other node's public key (normal at this step): the service starts after --peer-key=..."
+  elif out=$("${chk[@]}" 2>&1); then VALID=1; echo "    $out"
   else echo "$out" | sed 's/^/    /'; warn "configuration is not valid yet; the service will not be started"; fi
 fi
 

@@ -54,6 +54,10 @@ https://github.com/salehsayyadi/tuunel/releases/latest/download/install.sh
 curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/install.sh | sudo bash -s -- --role=edge
 ```
 
+> در این مرحله سرویس هنوز **روشن نمی‌شود** و پیام «waiting for the other node's public key»
+> (یا در نسخهٔ v0.9.0 پیام `ERROR ... public_key`) طبیعی است؛ چون هنوز کلید سرور خارج را
+> نداده‌اید. بعد از مرحلهٔ ۳ سرویس خودکار روشن می‌شود.
+
 در پایان، نصاب یک **کلید عمومی (PUBLIC KEY)** ۴۴ کاراکتری چاپ می‌کند. آن را کپی کنید
 (این را «کلید ایران» می‌نامیم). هر وقت لازم شد دوباره ببینیدش:
 
