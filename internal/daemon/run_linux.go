@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/salehsayyadi/tuunel/internal/api"
 	"github.com/salehsayyadi/tuunel/internal/config"
@@ -17,6 +18,7 @@ import (
 	"github.com/salehsayyadi/tuunel/internal/forwarding"
 	"github.com/salehsayyadi/tuunel/internal/mtu"
 	"github.com/salehsayyadi/tuunel/internal/netcfg"
+	"github.com/salehsayyadi/tuunel/internal/proxy"
 	"github.com/salehsayyadi/tuunel/internal/tun"
 )
 
@@ -128,10 +130,23 @@ func Run(configPath string) error {
 			return fmt.Errorf("api token must be at least 16 characters")
 		}
 	}
+	var px *proxy.Server
+	if cfg.Proxy.Listen != "" {
+		px = proxy.New(ProxyConfig(cfg), log)
+		go func() {
+			if err := px.Listen(ctx, 30*time.Second); err != nil {
+				log.Error("proxy listen failed", "address", cfg.Proxy.Listen, "error", err)
+				return
+			}
+			log.Info("proxy listening", "address", px.Addr().String(), "mode", px.Mode())
+			px.Serve(ctx)
+		}()
+		defer px.Close()
+	}
 	v, c, g := BuildInfo()
 	api.BuildLabels = [3]string{v, c, g}
 	srv := api.New(api.Backend{Engine: eng, Forwarding: fw, MTU: plan.MTU, Interface: dev.Name(), Version: Version,
-		Routes: func() []string { return applied }, RouteErrs: plan.Routes.Errors}, token)
+		Routes: func() []string { return applied }, RouteErrs: plan.Routes.Errors, Proxy: px}, token)
 	if err := srv.ServeUnix(cfg.API.Socket); err != nil {
 		log.Warn("management socket unavailable", "path", cfg.API.Socket, "error", err)
 	}

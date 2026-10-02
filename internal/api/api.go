@@ -22,6 +22,7 @@ import (
 	"github.com/salehsayyadi/tuunel/internal/engine"
 	"github.com/salehsayyadi/tuunel/internal/forwarding"
 	"github.com/salehsayyadi/tuunel/internal/mtu"
+	"github.com/salehsayyadi/tuunel/internal/proxy"
 )
 
 // Backend is what the API exposes; *engine.Engine plus daemon extras.
@@ -33,6 +34,7 @@ type Backend struct {
 	Routes     func() []string
 	RouteErrs  []string
 	Version    string
+	Proxy      *proxy.Server
 }
 
 type Server struct {
@@ -89,6 +91,12 @@ func (s *Server) handler(requireToken bool) http.Handler {
 			return []forwarding.RuleStatus{}, nil
 		}
 		return s.b.Forwarding.Status(), nil
+	})
+	get("/api/proxy", func(*http.Request) (any, error) {
+		if s.b.Proxy == nil {
+			return map[string]any{"enabled": false}, nil
+		}
+		return map[string]any{"enabled": true, "stats": s.b.Proxy.Stats()}, nil
 	})
 	get("/api/mtu", func(*http.Request) (any, error) { return s.b.MTU, nil })
 	mux.HandleFunc("/api/metrics", func(w http.ResponseWriter, r *http.Request) {

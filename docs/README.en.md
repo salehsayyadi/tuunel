@@ -127,6 +127,33 @@ never overwritten without `--force-config` (a backup is kept). From an
 archive: `tar xzf tuunel-linux-amd64.tar.gz && cd tuunel-v1.0.0 && sudo bash install.sh --role=edge`.
 `sudo bash install.sh --help` lists every option.
 
+### Built-in exit proxy (v0.9.2+)
+
+New configs get a SOCKS5 + HTTP proxy (one port) without installing any panel:
+clients connect to `EDGE_IP:PORT`; the edge authenticates them and relays every
+request through the tunnel to a backend on the remote's tunnel address
+(`10.200.0.2:1080`), which resolves DNS and dials the destination. The edge port
+is a random free port 20000-60999 with a random username/password (kept across
+`--force-config`); show it with `sudo tunnelctl proxy` on the edge
+(`socks5://`, `http://` and Telegram `tg://socks` links).
+
+Options: `--proxy-port=N`, `--proxy-user=NAME`, `--proxy-pass=PASS`, `--no-proxy`;
+`--proxy` adds it to an existing config (run on both nodes, remote first).
+TCP only (SOCKS5 CONNECT, HTTP CONNECT and plain HTTP). The remote backend has
+no authentication but accepts only tunnel-subnet clients and refuses loopback,
+link-local and private destinations (`proxy.allow_private: true` to allow).
+Config:
+
+```yaml
+# edge
+proxy: {listen: "0.0.0.0:43003", upstream: "10.200.0.2:1080", users: [{username: "u", password: "p"}]}
+# remote
+proxy: {listen: "10.200.0.2:1080"}
+```
+
+The order of `--ports` is the carrier preference order on the remote; carriers
+not listed are disabled (e.g. `--ports=udp=51900,tcp=2083,wss=2087`).
+
 ## systemd
 
 `/etc/systemd/system/tuunel.service` runs `tuunel run -config

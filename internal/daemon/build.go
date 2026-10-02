@@ -16,6 +16,7 @@ import (
 	"github.com/salehsayyadi/tuunel/internal/forwarding"
 	"github.com/salehsayyadi/tuunel/internal/health"
 	"github.com/salehsayyadi/tuunel/internal/mtu"
+	"github.com/salehsayyadi/tuunel/internal/proxy"
 	"github.com/salehsayyadi/tuunel/internal/routing"
 )
 
@@ -150,6 +151,22 @@ func BuildPlan(cfg *config.Config, detectMTU func(string) (int, error)) (*Plan, 
 	ec.PathMTU = pathMTU
 	ec.DetectPathMTU = detectMTU
 	return p, nil
+}
+
+// ProxyConfig converts the proxy section. A proxy without users only serves
+// clients from the tunnel subnets (and loopback).
+func ProxyConfig(cfg *config.Config) proxy.Config {
+	pc := proxy.Config{Listen: cfg.Proxy.Listen, Upstream: cfg.Proxy.Upstream, AllowPrivate: cfg.Proxy.AllowPrivate,
+		MaxConnections: cfg.Proxy.MaxConnections, Users: map[string]string{}}
+	for _, u := range cfg.Proxy.Users {
+		pc.Users[u.Username] = u.Password
+	}
+	if len(pc.Users) == 0 {
+		for _, p := range cfg.Prefixes() {
+			pc.AllowClients = append(pc.AllowClients, p.Masked())
+		}
+	}
+	return pc
 }
 
 // ForwardRules converts configuration forwarding rules.

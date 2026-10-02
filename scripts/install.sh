@@ -36,7 +36,16 @@ Options:
   --edge-address=HOST    remote role: IP/hostname of the edge
   --local-ip=CIDR        tunnel address of this node (default per role)
   --peer-ip=IP           tunnel address of the other node (default per role)
-  --ports=LIST           carrier ports, default "tcp=443,quic=443,wss=8443,udp=51900"
+  --ports=LIST           carrier ports in preference order (the remote tries them in this
+                         order), default "tcp=443,quic=443,wss=8443,udp=51900"; omit a
+                         carrier to disable it, e.g. "udp=51900,tcp=2083,wss=2087"
+Built-in exit proxy (on by default for new configs): clients connect to the edge
+with SOCKS5 or HTTP proxy settings and their traffic leaves from the remote:
+  --proxy-port=PORT      edge: public proxy port (default: random free port 20000-60999)
+  --proxy-user=NAME      edge: proxy username (default: random)
+  --proxy-pass=PASS      edge: proxy password (default: random)
+  --proxy                add the proxy to an existing config (both nodes; no --force-config needed)
+  --no-proxy             do not configure the proxy
   --binary-dir=DIR       use prebuilt tuunel/tunnelctl from DIR
   --url=BASE_URL         download BASE_URL/tuunel-linux-ARCH.tar.gz + BASE_URL/SHA256SUMS
   --version=VERSION      with an embedded release base URL: install that release
@@ -59,6 +68,7 @@ EOF
 }
 ROLE=""; PEER_KEY=""; EDGE_ADDR=""; LOCAL_IP=""; PEER_IP=""; PORTS="tcp=443,quic=443,wss=8443,udp=51900"
 BIN_DIR=""; URL=""; START=1; FORCE=0; UNINSTALL=0; PURGE=0
+PROXY=default; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""
 REL_VERSION=""; SIGNING_KEY=""; REQUIRE_SIG=0; CA_FILE=""; SYSTEMD=1; ROOT=""
 arg() { printf '%s' "${1#*=}"; }
 while [ $# -gt 0 ]; do
@@ -68,6 +78,8 @@ while [ $# -gt 0 ]; do
     --edge-address=*) EDGE_ADDR=$(arg "$1");; --edge-address) EDGE_ADDR=$2; shift;;
     --local-ip=*) LOCAL_IP=$(arg "$1");; --peer-ip=*) PEER_IP=$(arg "$1");;
     --ports=*) PORTS=$(arg "$1");;
+    --proxy) PROXY=add;; --no-proxy) PROXY=no;;
+    --proxy-port=*) PROXY_PORT=$(arg "$1");; --proxy-user=*) PROXY_USER=$(arg "$1");; --proxy-pass=*) PROXY_PASS=$(arg "$1");;
     --binary-dir=*) BIN_DIR=$(arg "$1");; --binary-dir) BIN_DIR=$2; shift;;
     --url=*) URL=$(arg "$1");; --url) URL=$2; shift;;
     --version=*) REL_VERSION=$(arg "$1");; --version) REL_VERSION=$2; shift;;
@@ -128,6 +140,14 @@ fi
 [ -c /dev/net/tun ] || { modprobe tun 2>/dev/null || true; }
 [ -c /dev/net/tun ] || die "/dev/net/tun missing: enable TUN/TAP for this VPS (provider panel) or load the 'tun' module"
 case "$ROLE" in ""|edge|remote) ;; iran) ROLE=edge;; foreign|kharej) ROLE=remote;; *) die "--role must be edge or remote";; esac
+for kv in ${PORTS//,/ }; do
+  case "${kv%%=*}" in tcp|quic|wss|udp) ;; *) die "--ports: unknown carrier '${kv%%=*}' (use tcp, quic, wss, udp)";; esac
+  printf '%s' "${kv#*=}" | grep -Eq '^[0-9]{1,5}$' && [ "${kv#*=}" -ge 1 ] && [ "${kv#*=}" -le 65535 ] || die "--ports: bad port in '$kv'"
+done
+[ -z "$PROXY_PORT" ] || { printf '%s' "$PROXY_PORT" | grep -Eq '^[0-9]{1,5}$' && [ "$PROXY_PORT" -ge 1 ] && [ "$PROXY_PORT" -le 65535 ]; } || die "--proxy-port must be 1-65535"
+for v in "$PROXY_USER" "$PROXY_PASS"; do
+  [ -z "$v" ] || printf '%s' "$v" | grep -Eq '^[A-Za-z0-9._~-]{1,64}$' || die "--proxy-user/--proxy-pass: use 1-64 characters from A-Z a-z 0-9 . _ ~ -"
+done
 [ -z "$PEER_KEY" ] || printf '%s' "$PEER_KEY" | grep -Eq '^[A-Za-z0-9+/]{43}=$' || die "--peer-key must be a 44-character base64 public key (tuunel pubkey)"
 say "host: $OSNAME, arch $ARCH"
 
@@ -214,8 +234,38 @@ PUB=$("$BINDIR/tuunel" pubkey -key "$KEY")
 printf '%s\n' "$PUB" >"$ETC/node.pub"; chmod 0644 "$ETC/node.pub"
 
 say "4/8 configuration"
-port() { printf '%s' "$PORTS" | tr ',' '\n' | awk -F= -v k="$1" '$1==k{print $2}'; }
-TCP_P=$(port tcp); QUIC_P=$(port quic); WSS_P=$(port wss); UDP_P=$(port udp)
+rand_hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
+port_busy() { ss -Hltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$1\$"; }
+pick_port() {   # random free TCP port that is not a carrier port
+  local p i
+  for i in $(seq 1 50); do
+    p=$(( 20000 + ( $(od -An -tu2 -N2 /dev/urandom | tr -d ' ') % 41000 ) ))
+    case ",$PORTS," in *"=$p,"*) continue;; esac
+    port_busy "$p" || { printf '%s' "$p"; return; }
+  done
+  printf '54781'
+}
+# previous proxy settings (kept across --force-config so client settings stay valid)
+OLD_PX=""
+[ -f "$CFG" ] && OLD_PX=$(sed -n 's/^proxy: {listen: "[^"]*:\([0-9]*\)", upstream: "[^"]*", users: \[{username: "\([^"]*\)", password: "\([^"]*\)"}\]}.*/\1 \2 \3/p' "$CFG" | head -1)
+proxy_line() {   # $1 = role, $2 = peer tunnel IP or own tunnel IP
+  if [ "$1" = edge ]; then
+    set -- "$1" "$2" $OLD_PX
+    local pp=${PROXY_PORT:-${3:-}} pu=${PROXY_USER:-${4:-}} pw=${PROXY_PASS:-${5:-}}
+    [ -n "$pp" ] || pp=$(pick_port); [ -n "$pu" ] || pu=user$(rand_hex 3); [ -n "$pw" ] || pw=$(rand_hex 12)
+    echo "proxy: {listen: \"0.0.0.0:$pp\", upstream: \"$2:1080\", users: [{username: \"$pu\", password: \"$pw\"}]}   # SOCKS5+HTTP exit proxy, see: tunnelctl proxy"
+  else
+    echo "proxy: {listen: \"$2:1080\"}   # exit side of the edge's proxy (reachable only through the tunnel)"
+  fi
+}
+carrier_lines() {   # $1 = edge|remote; emitted in --ports order (= preference order)
+  local kv k v
+  for kv in ${PORTS//,/ }; do
+    k=${kv%%=*}; v=${kv#*=}
+    if [ "$1" = edge ]; then printf '  - {carrier: %-5s address: "0.0.0.0:%s"}\n' "$k," "$v"
+    else printf '      - {type: %-5s port: %s}\n' "$k," "$v"; fi
+  done
+}
 gen_config() {
   local pk=${PEER_KEY:-REPLACE_ME_WITH_PEER_PUBLIC_KEY}
   if [ "$ROLE" = edge ]; then
@@ -225,15 +275,13 @@ gen_config() {
       echo "interface: {name: tun0, addresses: [\"$me\"], mtu: auto}"
       echo "security: {private_key_file: $KEY}"
       echo "listen:"
-      [ -n "$TCP_P" ]  && echo "  - {carrier: tcp,  address: \"0.0.0.0:$TCP_P\"}"
-      [ -n "$QUIC_P" ] && echo "  - {carrier: quic, address: \"0.0.0.0:$QUIC_P\"}"
-      [ -n "$WSS_P" ]  && echo "  - {carrier: wss,  address: \"0.0.0.0:$WSS_P\"}"
-      [ -n "$UDP_P" ]  && echo "  - {carrier: udp,  address: \"0.0.0.0:$UDP_P\"}"
+      carrier_lines edge
       echo "peers:"
       echo "  - {name: remote, public_key: \"$pk\", allowed_ips: [\"$peer/32\"]}"
       echo "forwarding:            # expose services of the remote node, e.g."
       echo "  tcp: []              # - {listen: \"0.0.0.0:2222\", target: \"$peer:22\"}"
       echo "  udp: []"
+      [ "$PROXY" = no ] || proxy_line edge "$peer"
       echo "api: {socket: $API_SOCK}"
       echo "log: {level: info}"; } 
   else
@@ -249,10 +297,8 @@ gen_config() {
       echo "    allowed_ips: [\"$peer/32\"]"
       echo "    endpoints: [{name: edge, address: $EDGE_ADDR}]"
       echo "    carriers:            # preference order; failover walks this list"
-      [ -n "$TCP_P" ]  && echo "      - {type: tcp,  port: $TCP_P}"
-      [ -n "$QUIC_P" ] && echo "      - {type: quic, port: $QUIC_P}"
-      [ -n "$WSS_P" ]  && echo "      - {type: wss,  port: $WSS_P}"
-      [ -n "$UDP_P" ]  && echo "      - {type: udp,  port: $UDP_P}"
+      carrier_lines remote
+      [ "$PROXY" = no ] || proxy_line remote "${me%/*}"
       echo "api: {socket: $API_SOCK}"
       echo "log: {level: info}"; }
   fi
@@ -262,6 +308,19 @@ if [ -f "$CFG" ] && [ "$FORCE" = 0 ]; then
   if [ -n "$PEER_KEY" ] && grep -q 'REPLACE_ME' "$CFG"; then
     cp -p "$CFG" "$CFG.bak.$(date +%Y%m%d%H%M%S)"
     sed -i -E "s#REPLACE_ME[A-Za-z0-9_]*#$PEER_KEY#" "$CFG"; echo "    filled peer public key into $CFG"
+  fi
+  if [ "$PROXY" = add ] && ! grep -q '^proxy:' "$CFG"; then
+    cp -p "$CFG" "$CFG.bak.$(date +%Y%m%d%H%M%S)"
+    if grep -q '^listen:' "$CFG"; then   # edge: proxy upstream is the peer's tunnel address
+      pip=$(sed -n 's/.*allowed_ips: \["\([0-9.]*\)\/32"\].*/\1/p' "$CFG" | head -1)
+      printf '%s\n' "$(proxy_line edge "${pip:-10.200.0.2}")" >>"$CFG"
+    else
+      lip=$(sed -n 's/.*addresses: \["\([0-9.]*\)\/[0-9]*"\].*/\1/p' "$CFG" | head -1)
+      printf '%s\n' "$(proxy_line remote "${lip:-10.200.0.2}")" >>"$CFG"
+    fi
+    echo "    added the built-in exit proxy to $CFG"
+  elif [ -n "$PROXY_PORT" ] && grep -q '^proxy: {listen: "0.0.0.0:' "$CFG"; then
+    sed -i -E "s#^proxy: \{listen: \"0.0.0.0:[0-9]+\"#proxy: {listen: \"0.0.0.0:$PROXY_PORT\"#" "$CFG"; echo "    proxy port set to $PROXY_PORT"
   fi
 elif [ -n "$ROLE" ]; then
   [ -f "$CFG" ] && cp -p "$CFG" "$CFG.bak.$(date +%Y%m%d%H%M%S)"
@@ -331,5 +390,24 @@ cat <<MSG
   status:       tunnelctl status          diagnostics:  tunnelctl doctor
   logs:         journalctl -u tuunel -f   reload cfg:   systemctl reload tuunel
   uninstall:    sudo bash install.sh --uninstall [--purge]
-  firewall:     edge must accept the listen ports (default tcp/443, udp/443, tcp/8443, udp/51900)
 MSG
+if grep -qs '^listen:' "$CFG"; then
+  fwp=$(grep -oE 'carrier: *(tcp|wss|quic|udp|icmp), *address: *"[^"]*"' "$CFG" | sed -E 's/carrier: *(tcp|wss|quic|udp|icmp), *address: *"[^"]*:([0-9]+)"/\1 \2/' |
+        while read -r c p; do case $c in tcp|wss) printf 'tcp/%s ' "$p";; quic|udp) printf 'udp/%s ' "$p";; esac; done)
+  pxp=$(sed -n 's/^proxy: {listen: "[^"]*:\([0-9]*\)".*/\1/p' "$CFG" | head -1)
+  echo "  firewall:     this edge must accept: ${fwp}${pxp:+tcp/$pxp (proxy)}"
+  if [ -n "$pxp" ]; then
+    echo
+    echo "Built-in proxy (SOCKS5 + HTTP on one port; traffic exits from the remote node):"
+    if [ -n "$DOCTOR" ] && px=$(timeout 10 "$BINDIR/tunnelctl" proxy 2>/dev/null) && printf '%s' "$px" | grep -q 'username:'; then
+      printf '%s\n' "$px" | sed -n '/Client settings/,$p' | sed 's/^/  /'
+    else
+      set -- $(sed -n 's/^proxy: {listen: "[^"]*:\([0-9]*\)", upstream: "[^"]*", users: \[{username: "\([^"]*\)", password: "\([^"]*\)"}\]}.*/\1 \2 \3/p' "$CFG" | head -1)
+      echo "  port: ${1:-?}   username: ${2:-?}   password: ${3:-?}   (works once the tunnel is up)"
+    fi
+    echo "  show again any time:  tunnelctl proxy"
+  fi
+elif [ -f "$CFG" ]; then
+  echo "  firewall:     remote node: no inbound port needed (it dials the edge)"
+  grep -qs '^proxy:' "$CFG" && echo "  proxy:        exit side enabled; client settings are shown on the edge: tunnelctl proxy"
+fi

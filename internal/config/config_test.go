@@ -67,3 +67,27 @@ func TestICMPAllowedWithFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+func TestProxyValidation(t *testing.T) {
+	ok := []string{
+		base() + "proxy: {listen: \"0.0.0.0:54781\", upstream: \"10.200.0.2:1080\", users: [{username: u, password: p}]}\n",
+		base() + "proxy: {listen: \"10.200.0.1:1080\"}\n",
+		base() + "proxy: {listen: \"127.0.0.1:1080\"}\n",
+	}
+	for i, y := range ok {
+		if _, err := Parse([]byte(y)); err != nil {
+			t.Errorf("ok[%d]: %v", i, err)
+		}
+	}
+	bad := map[string]string{
+		"open without users": base() + "proxy: {listen: \"0.0.0.0:1080\"}\n",
+		"bad listen":         base() + "proxy: {listen: \"1080\", users: [{username: u, password: p}]}\n",
+		"empty password":     base() + "proxy: {listen: \":1080\", users: [{username: u, password: \"\"}]}\n",
+		"colon username":     base() + "proxy: {listen: \":1080\", users: [{username: \"a:b\", password: p}]}\n",
+		"bad upstream":       base() + "proxy: {listen: \":1080\", upstream: x, users: [{username: u, password: p}]}\n",
+	}
+	for name, y := range bad {
+		if _, err := Parse([]byte(y)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

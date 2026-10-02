@@ -44,6 +44,7 @@ type Config struct {
 	Health       Health       `yaml:"health"`
 	Failover     Failover     `yaml:"failover"`
 	Forwarding   Forwarding   `yaml:"forwarding"`
+	Proxy        Proxy        `yaml:"proxy"`
 	API          API          `yaml:"api"`
 	Experimental Experimental `yaml:"experimental"`
 	Log          Log          `yaml:"log"`
@@ -143,6 +144,22 @@ type Rule struct {
 	Listen         string `yaml:"listen"`
 	Target         string `yaml:"target"`
 	MaxConnections int    `yaml:"max_connections"`
+}
+
+// Proxy is the built-in SOCKS5/HTTP exit proxy (see internal/proxy).
+// Edge: public listen + users + upstream (the remote's backend through the
+// tunnel). Remote: listen on its tunnel address, no users, no upstream.
+type Proxy struct {
+	Listen         string      `yaml:"listen"`
+	Upstream       string      `yaml:"upstream"`
+	Users          []ProxyUser `yaml:"users"`
+	AllowPrivate   bool        `yaml:"allow_private"`
+	MaxConnections int         `yaml:"max_connections"`
+}
+
+type ProxyUser struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
 }
 
 type API struct {
@@ -469,6 +486,35 @@ func (c *Config) Validate() error {
 		}
 		if _, _, err := net.SplitHostPort(r.Target); err != nil {
 			add("forwarding rule %d: target %q must be host:port", i, r.Target)
+		}
+	}
+	if px := c.Proxy; px.Listen != "" || px.Upstream != "" || len(px.Users) > 0 {
+		host, _, err := net.SplitHostPort(px.Listen)
+		if err != nil {
+			add("proxy.listen %q must be host:port", px.Listen)
+		}
+		if px.Upstream != "" {
+			if _, _, err := net.SplitHostPort(px.Upstream); err != nil {
+				add("proxy.upstream %q must be host:port", px.Upstream)
+			}
+		}
+		for i, u := range px.Users {
+			if u.Username == "" || u.Password == "" || len(u.Username) > 255 || len(u.Password) > 255 || strings.Contains(u.Username, ":") {
+				add("proxy.users[%d]: username/password must be 1-255 characters (no ':' in username)", i)
+			}
+		}
+		if len(px.Users) == 0 && err == nil {
+			// without authentication the proxy must only be reachable through the tunnel
+			ip, perr := netip.ParseAddr(host)
+			ok := perr == nil && ip.IsLoopback()
+			for _, pf := range c.Prefixes() {
+				if perr == nil && pf.Addr() == ip {
+					ok = true
+				}
+			}
+			if !ok {
+				add("proxy without users must listen on this node's tunnel address or loopback (got %q)", px.Listen)
+			}
 		}
 	}
 	if c.API.Listen != "" {

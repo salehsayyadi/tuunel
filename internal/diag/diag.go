@@ -140,10 +140,17 @@ func Run(ctx context.Context, in Inputs) *Report {
 			}
 		}
 	}
+	up := map[string]bool{}
+	for _, p := range st.Engine.Peers {
+		up[p.Name] = p.Up
+	}
 	for _, pr := range in.Probes {
 		lvl := OK
 		detail := fmt.Sprintf("handshake %v, rtt %v, loss %.0f%%", pr.HandshakeRTT.Round(time.Millisecond), pr.RTT.Round(time.Millisecond), pr.LossPct)
 		switch {
+		case !pr.OK && up[pr.Peer]:
+			// the tunnel works over another carrier: this one is only a missing backup
+			lvl, detail = Warn, ClassifyError(pr.Error)+" (tunnel is UP via another carrier; this carrier is only unavailable as a backup)"
 		case !pr.OK:
 			lvl, detail = Fail, ClassifyError(pr.Error)
 		case pr.LossPct > 20:

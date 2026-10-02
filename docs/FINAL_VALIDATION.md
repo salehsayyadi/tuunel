@@ -206,34 +206,26 @@ RELEASE_BASE_URL=https://dl.example.com/tuunel SIGNING_KEY=~/.ssh/tuunel_release
 curl -fsSL --proto '=https' --tlsv1.2 https://dl.example.com/tuunel/v1.0.0/install.sh | sudo bash -s -- --role=edge --require-signature
 ```
 
-### REAL_TWO_SERVER_TEST: BLOCKED
+### REAL_TWO_SERVER_TEST: PARTIAL (first real deployment, v0.9.1)
 
-Reason: only one network environment is available.
+Edge: Ubuntu 24.04 VPS in Iran; remote: Ubuntu 22.04, Hetzner Helsinki.
+Ports 443/8443 were already taken on the edge, so both nodes used
+`--ports=tcp=2083,quic=51901,wss=2087,udp=51900` (QUIC also tried on 2083).
 
-Required: one edge VPS and one remote VPS with independent public
-connectivity (ideally different providers/regions; IPv6 on both if possible).
+| Check | Result |
+|---|---|
+| one-line install from GitHub Releases, key exchange, service start | PASS (both nodes) |
+| tunnel up, `ping` 10.200.0.1 <-> 10.200.0.2 | PASS, ~86-90 ms, 0% loss |
+| carriers (`tunnelctl test-carriers` / doctor reachability) | tcp PASS, wss PASS, udp PASS, **quic FAIL** on udp/2083 and udp/51901 while plain UDP on 51900 worked: QUIC is blocked on the path (DPI), not a port problem |
+| iperf3 through the tunnel (tcp carrier) | ~190 Mbit/s remote->edge, 100-160 Mbit/s edge->remote |
+| failover | PASS: edge service restart killed the udp session; remote marked udp failed after ~10 s and continued on wss, then preempted to tcp (better ranked) |
+| carrier preference order | as configured; moving udp first in the remote config made udp the active carrier |
 
-Procedure:
-
-```bash
-# edge
-sudo bash install.sh --role=edge                                  # note EDGE_KEY
-# remote
-sudo bash install.sh --role=remote --edge-address=EDGE_IP --peer-key=EDGE_KEY   # note REMOTE_KEY
-# edge
-sudo bash install.sh --peer-key=REMOTE_KEY
-# both: record the path
-ping -c 100 EDGE_IP; tracepath EDGE_IP; sudo tunnelctl status; sudo tunnelctl test-carriers
-# tunnel traffic + MTU
-ping -c 100 10.200.0.1; ping -M do -s 1352 10.200.0.1; iperf3 -c 10.200.0.1 -t 20 (server on edge)
-# failover: on the edge block one carrier at a time while iperf3/ssh through the tunnel runs
-sudo nft add table ip t; sudo nft add chain ip t i '{ type filter hook input priority 0; }'
-sudo nft add rule ip t i tcp dport 443 drop        # then udp dport 443, tcp dport 8443, udp dport 51900
-sudo nft delete table ip t
-# endpoint failover: add a second edge address under endpoints:, block the first
-# reverse/forwarding: forwarding.tcp 0.0.0.0:2222 -> 10.200.0.2:22 on the edge; ssh -p 2222 EDGE_IP
-# restart/reboot either side; systemctl status tuunel; journalctl -u tuunel
-```
+Findings fixed in v0.9.2: `doctor` reported Overall FAIL when only a backup
+carrier was unreachable (now WARN while the tunnel is UP); the installer's
+firewall hint printed default ports instead of the configured ones; carrier
+preference order could not be chosen at install time (now = `--ports` order).
+Still open: QUIC through Iranian DPI; restricted-network soak.
 
 ### RESTRICTED_NETWORK_TEST: BLOCKED
 
@@ -258,6 +250,7 @@ fallback in `status.jsonl` and `tuunel_failure_switches_total`.
 **NOT PRODUCTION READY.** The tunnel core, carriers, failover, MTU handling,
 metrics and installer logic passed every executed lab test, and this round
 fixed one critical availability bug. Critical real-world validation is still
-missing: live systemd, Docker, two real servers over the Internet, and any
-restricted network. The soak still shows residual degrade flapping on lossy
+missing: live systemd, Docker, a full two-server soak (the first real
+Iran <-> Hetzner deployment passed install, tunnel, throughput and failover;
+QUIC is blocked on that path), and a restricted-network soak. The soak still shows residual degrade flapping on lossy
 paths.

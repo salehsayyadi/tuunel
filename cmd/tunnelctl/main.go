@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/salehsayyadi/tuunel/internal/api"
+	"github.com/salehsayyadi/tuunel/internal/config"
 	"github.com/salehsayyadi/tuunel/internal/diag"
 	"github.com/salehsayyadi/tuunel/internal/engine"
 	"github.com/salehsayyadi/tuunel/internal/forwarding"
+	"github.com/salehsayyadi/tuunel/internal/proxy"
 )
 
 var (
@@ -99,6 +101,8 @@ func main() {
 		}
 	case "forwarding":
 		err = forwardingCmd()
+	case "proxy":
+		err = proxyCmd()
 	case "reconnect":
 		var r map[string]int
 		if err = call("POST", "/api/tunnels/reconnect?peer="+*peerF, &r); err == nil {
@@ -132,6 +136,7 @@ func usage() {
   routes          routes installed into the tunnel interface
   metrics         Prometheus metrics
   forwarding      port forwarding rules and counters
+  proxy           built-in SOCKS5/HTTP exit proxy: counters and client connection links
   reconnect       force re-establishment of the tunnel
   doctor          diagnose kernel, permissions, config, keys, DNS, MTU, routing, reachability
   logs            recent service logs (journalctl -u tuunel)
@@ -397,6 +402,53 @@ func forwardingCmd() error {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\n", r.Proto, r.Listen, r.Target, r.Active, r.Total, r.Rejected, human(r.BytesIn), human(r.BytesOut))
 	}
 	return w.Flush()
+}
+
+func proxyCmd() error {
+	var r struct {
+		Enabled bool         `json:"enabled"`
+		Stats   *proxy.Stats `json:"stats"`
+	}
+	if err := call("GET", "/api/proxy", &r); err != nil {
+		return err
+	}
+	if !r.Enabled || r.Stats == nil {
+		fmt.Println("Proxy: disabled (no proxy section in the configuration)")
+		return nil
+	}
+	st := r.Stats
+	fmt.Printf("Proxy: %s  (%s)\nActive: %d   Total: %d   Rejected: %d   Auth failures: %d\nIn: %s   Out: %s\n",
+		st.Listen, st.Mode, st.Active, st.Total, st.Rejected, st.AuthFail, human(st.BytesIn), human(st.BytesOut))
+	cfg, err := config.Load(*cfgPath)
+	if err != nil || len(cfg.Proxy.Users) == 0 {
+		if err == nil && cfg.Proxy.Upstream == "" {
+			fmt.Println("This is the backend (exit) side: clients connect to the edge node's proxy port.")
+		}
+		return nil
+	}
+	_, port, _ := net.SplitHostPort(cfg.Proxy.Listen)
+	ip := publicIP()
+	u := cfg.Proxy.Users[0]
+	fmt.Printf("\nClient settings (SOCKS5 or HTTP proxy on the same port):\n  server:   %s\n  port:     %s\n  username: %s\n  password: %s\n", ip, port, u.Username, u.Password)
+	fmt.Printf("  socks5://%s:%s@%s:%s\n  http://%s:%s@%s:%s\n  Telegram: tg://socks?server=%s&port=%s&user=%s&pass=%s\n",
+		u.Username, u.Password, ip, port, u.Username, u.Password, ip, port, ip, port, u.Username, u.Password)
+	return nil
+}
+
+// publicIP returns the source address of the default route (no packet is
+// sent) or a placeholder when it is not a public address.
+func publicIP() string {
+	if v := os.Getenv("TUUNEL_PUBLIC_IP"); v != "" {
+		return v
+	}
+	c, err := net.Dial("udp", "1.1.1.1:53")
+	if err == nil {
+		defer c.Close()
+		if a, ok := c.LocalAddr().(*net.UDPAddr); ok && !a.IP.IsPrivate() && !a.IP.IsLoopback() {
+			return a.IP.String()
+		}
+	}
+	return "SERVER_PUBLIC_IP"
 }
 
 func doctor() int {

@@ -29,6 +29,26 @@ try:
     r = subprocess.run(["ip", "netns", "exec", lab.nb, "timeout", "25", f"{BIN}/tunnelctl", "-socket", R["b_socket"],
                         "-config", f"{edge}/etc/tuunel/config.yaml", "doctor"], capture_output=True, text=True, timeout=30)
     R["doctor_rc"], R["doctor_tail"] = r.returncode, (r.stdout + r.stderr).strip().splitlines()[-6:]
+    # built-in exit proxy: client on the edge -> edge proxy -> tunnel -> remote dials the destination
+    ecfg = open(f"{edge}/etc/tuunel/config.yaml").read()
+    m = re.search(r'proxy: \{listen: "[^"]*:(\d+)", upstream: "[^"]*", users: \[\{username: "([^"]*)", password: "([^"]*)"', ecfg)
+    R["proxy_configured"] = bool(m)
+    if m:
+        pport, pu, pw = m.groups()
+        web = subprocess.Popen(["ip", "netns", "exec", lab.na, "python3", "-m", "http.server", "18080", "--bind", "192.0.2.1",
+                                "--directory", lab.w], stdout=subprocess.DEVNULL, stderr=open(f"{lab.w}/web.log", "w"))
+        time.sleep(1)
+        open(f"{lab.w}/hello.txt", "w").write("via-remote\n")
+        def curl(px):
+            r = lab.B(f"curl -s -m 10 -o /dev/null -w %{{http_code}} -x {px} http://192.0.2.1:18080/hello.txt", 15)
+            return r.stdout.strip()
+        R["proxy_socks5h"] = curl(f"socks5h://{pu}:{pw}@127.0.0.1:{pport}")
+        R["proxy_http"] = curl(f"http://{pu}:{pw}@127.0.0.1:{pport}")
+        R["proxy_bad_password"] = curl(f"socks5h://{pu}:wrong@127.0.0.1:{pport}")
+        web.terminate(); web.wait(5)
+        log = open(f"{lab.w}/web.log").read()
+        # every proxied request must reach the web server from the REMOTE's address (192.0.2.1), not the edge
+        R["proxy_exit_from_remote"] = log.count("192.0.2.1 - -") >= 2 and "192.0.2.2 - -" not in log
     sub = subprocess.run(["ip", "netns", "exec", lab.nb, "nft", "-f", "-"], input=
                          'table ip tlab {\n chain tin {\n  type filter hook input priority 0; policy accept;\n'
                          '  iifname "vb" tcp dport 443 drop\n }\n}\n', capture_output=True, text=True, timeout=10)
@@ -38,7 +58,9 @@ try:
     lab.stop("a"); R["edge_exit"] = lab.stop("b")
     ok = (R["up_tcp443_s"] is not None and R["ping_remote_to_edge"]["loss_pct"] == 0 and
           (R["tcp_remote_to_edge"].get("mbit") or 0) > 10 and R["failover_to_quic443_s"] is not None and
-          R["ping_after_failover"]["loss_pct"] <= 10 and R["edge_exit"] == 0)
+          R["ping_after_failover"]["loss_pct"] <= 10 and R["edge_exit"] == 0 and
+          (not R["proxy_configured"] or (R["proxy_socks5h"] == "200" and R["proxy_http"] == "200" and
+                                         R["proxy_bad_password"] != "200" and R["proxy_exit_from_remote"])))
 finally:
     lab.cleanup()
 R["result"] = "PASS" if ok else "FAIL"
