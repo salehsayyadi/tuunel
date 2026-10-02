@@ -13,7 +13,21 @@ Requirements: Linux amd64/arm64 with `/dev/net/tun`, systemd (for the service),
 Ubuntu 22.04/24.04, Debian 12, RHEL/Alma/Rocky 9. See
 [FINAL_VALIDATION.md](FINAL_VALIDATION.md) for what was actually executed.
 
-## 1. One-line install (published release)
+## 0. Official one-line install (GitHub releases)
+
+```bash
+# EDGE (Iran)
+curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/install.sh | sudo bash -s -- --role=edge
+# REMOTE (foreign)
+curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/install.sh | sudo bash -s -- --role=remote --edge-address=EDGE_IP --peer-key=EDGE_KEY
+# EDGE again
+curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/install.sh | sudo bash -s -- --peer-key=REMOTE_KEY
+```
+
+Releases are built by `.github/workflows/release.yml` whenever `VERSION`
+changes on `main`. A specific release: `.../releases/download/v0.9.0/install.sh`.
+
+## 1. One-line install (self-hosted release)
 
 A release is the content of `dist/` produced by `scripts/release.sh`, published
 at one **public HTTPS** URL per version (`$BASE/$VERSION/…`):

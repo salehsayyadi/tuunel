@@ -2,7 +2,7 @@
 # tuunel installer / upgrader / uninstaller (Linux, systemd).  Run with --help.
 #
 # One-line install from a published release (HTTPS, SHA256 + optional signature):
-#   curl -fsSL --proto '=https' https://HOST/PATH/install.sh | sudo bash -s -- --role=edge
+#   curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/install.sh | sudo bash -s -- --role=edge
 # From an extracted release archive or a source checkout:
 #   sudo bash install.sh --role=edge
 set -euo pipefail
@@ -11,6 +11,9 @@ umask 022
 EMBED_BASE_URL="@TUUNEL_BASE_URL@"      # e.g. https://github.com/OWNER/REPO/releases/download
 EMBED_VERSION="@TUUNEL_VERSION@"        # release this installer belongs to
 EMBED_SIGNER="@TUUNEL_SIGNER@"          # ssh public key that signs SHA256SUMS (optional)
+# Official public releases (used when this script is piped from the repository
+# without --url and no local binaries exist): latest GitHub release assets.
+DEFAULT_RELEASE_URL="https://github.com/salehsayyadi/tuunel/releases/latest/download"
 embedded() { case "$1" in @*@|"") return 1;; *) return 0;; esac; }
 
 usage() { cat <<'EOF'
@@ -138,6 +141,10 @@ if [ -z "$URL" ] && [ -z "$BIN_DIR" ] && embedded "$EMBED_BASE_URL"; then
     v=${REL_VERSION:-$EMBED_VERSION}; embedded "$v" || die "no release version known; pass --version=VERSION"
     URL=$EMBED_BASE_URL/$v
   fi
+fi
+if [ -z "$URL" ] && [ -z "$BIN_DIR" ] && [ "$UNINSTALL" = 0 ] && [ ! -x "$SRC_DIR/bin/tuunel" ] && [ ! -x "$SRC_DIR/../bin/tuunel" ] \
+   && ! { command -v go >/dev/null && [ -f "$SRC_DIR/../go.mod" ]; }; then
+  if [ -n "$REL_VERSION" ]; then URL=${DEFAULT_RELEASE_URL%/latest/download}/download/$REL_VERSION; else URL=$DEFAULT_RELEASE_URL; fi
 fi
 [ -n "$REL_VERSION" ] && [ -z "$URL" ] && die "--version needs an installer with an embedded release URL (or use --url)"
 PKG=""   # directory containing bin/, systemd/, configs/

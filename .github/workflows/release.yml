@@ -1,0 +1,38 @@
+# Builds and publishes a GitHub release whenever VERSION changes on main
+# (or manually via "Run workflow"). Assets: tuunel-linux-{amd64,arm64}.tar.gz,
+# install.sh (with the release URL embedded) and SHA256SUMS.
+# One-line install afterwards:
+#   curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/install.sh | sudo bash -s -- --role=edge
+name: release
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, check-latest: true }
+      - name: vet + test
+        run: go vet ./... && go test -count=1 ./...
+      - name: build release
+        run: |
+          V=$(tr -d ' \n' < VERSION)
+          echo "V=$V" >> "$GITHUB_ENV"
+          RELEASE_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download" scripts/release.sh "$V" dist
+      - name: publish
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          if gh release view "$V" >/dev/null 2>&1; then
+            gh release upload "$V" dist/* --clobber
+          else
+            gh release create "$V" dist/* --target "$GITHUB_SHA" --title "tuunel $V" --latest \
+              --notes "One-line install: curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh | sudo bash -s -- --role=edge"
+          fi
