@@ -309,7 +309,12 @@ func (s *Server) socks5(ctx context.Context, c net.Conn, br *bufio.Reader) {
 	}
 	up, err := s.dial(ctx, target)
 	if err != nil {
-		s.log.Debug("proxy dial failed", "target", target, "error", err)
+		var ue upstreamError
+		if s.cfg.Upstream != "" && !errors.As(err, &ue) {
+			s.log.Warn("proxy upstream unreachable (is the remote proxy listening? tunnelctl proxy on the remote)", "upstream", s.cfg.Upstream, "error", err)
+		} else {
+			s.log.Debug("proxy dial failed", "target", target, "error", err)
+		}
 		socksReply(c, replyCode(err))
 		return
 	}

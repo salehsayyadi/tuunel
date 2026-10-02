@@ -45,6 +45,7 @@ type Config struct {
 	Failover     Failover     `yaml:"failover"`
 	Forwarding   Forwarding   `yaml:"forwarding"`
 	Proxy        Proxy        `yaml:"proxy"`
+	Exit         Exit         `yaml:"exit"`
 	API          API          `yaml:"api"`
 	Experimental Experimental `yaml:"experimental"`
 	Log          Log          `yaml:"log"`
@@ -155,6 +156,21 @@ type Proxy struct {
 	Users          []ProxyUser `yaml:"users"`
 	AllowPrivate   bool        `yaml:"allow_private"`
 	MaxConnections int         `yaml:"max_connections"`
+}
+
+// Exit makes one node the internet exit of the other ("route all").
+// client (edge): every outbound connection this host originates (and traffic
+// it forwards, e.g. containers) leaves through the tunnel; replies to inbound
+// connections (SSH, panels, the carriers themselves) keep using the normal
+// route. server (remote): forwards and NATs traffic from the peers.
+// Applied by "tuunel exit-up" (systemd ExecStartPost, as root).
+type Exit struct {
+	Mode    string   `yaml:"mode"`    // "", "client" or "server"
+	Peer    string   `yaml:"peer"`    // client: peer carrying the traffic (default: the only peer)
+	Table   int      `yaml:"table"`   // client: policy routing table (default 7120)
+	Exclude []string `yaml:"exclude"` // client: extra destination prefixes that bypass the tunnel
+	IPv6    string   `yaml:"ipv6"`    // client: "block" (default: no IPv6 leak, apps fall back to IPv4) or "direct"
+	Source  []string `yaml:"source"`  // server: source prefixes to NAT (default: all peers' allowed IPs)
 }
 
 type ProxyUser struct {
@@ -515,6 +531,42 @@ func (c *Config) Validate() error {
 			if !ok {
 				add("proxy without users must listen on this node's tunnel address or loopback (got %q)", px.Listen)
 			}
+		}
+	}
+	switch x := c.Exit; x.Mode {
+	case "":
+	case "client":
+		if x.Peer == "" && len(c.Peers) != 1 {
+			add("exit.peer is required when there is more than one peer")
+		} else if x.Peer != "" {
+			found := false
+			for _, p := range c.Peers {
+				found = found || p.Name == x.Peer
+			}
+			if !found {
+				add("exit.peer %q is not a configured peer", x.Peer)
+			}
+		}
+		v4 := false
+		for _, pf := range c.Prefixes() {
+			v4 = v4 || pf.Addr().Is4()
+		}
+		if !v4 {
+			add("exit client needs an IPv4 interface address")
+		}
+		if x.Table < 0 || (x.Table > 0 && x.Table < 1000) || x.Table > 2147483647 {
+			add("exit.table must be between 1000 and 2147483647")
+		}
+		if x.IPv6 != "" && x.IPv6 != "block" && x.IPv6 != "direct" {
+			add("exit.ipv6 must be block or direct")
+		}
+	case "server":
+	default:
+		add("exit.mode must be client or server")
+	}
+	for _, e := range append(append([]string{}, c.Exit.Exclude...), c.Exit.Source...) {
+		if _, err := netip.ParsePrefix(e); err != nil {
+			add("exit: %q is not a prefix (CIDR)", e)
 		}
 	}
 	if c.API.Listen != "" {

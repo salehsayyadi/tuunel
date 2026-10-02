@@ -12,6 +12,10 @@ User=tuunel
 Group=tuunel
 ExecStartPre=/usr/local/bin/tuunel check -config /etc/tuunel/config.yaml
 ExecStart=/usr/local/bin/tuunel run -config /etc/tuunel/config.yaml
+# "route all" internet exit (config exit:), applied as root outside the sandbox;
+# no-op without an exit section
+ExecStartPost=+/usr/local/bin/tuunel exit-up -config /etc/tuunel/config.yaml
+ExecStopPost=+/usr/local/bin/tuunel exit-down -config /etc/tuunel/config.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3

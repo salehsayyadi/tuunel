@@ -46,6 +46,10 @@ with SOCKS5 or HTTP proxy settings and their traffic leaves from the remote:
   --proxy-pass=PASS      edge: proxy password (default: random)
   --proxy                add the proxy to an existing config (both nodes; no --force-config needed)
   --no-proxy             do not configure the proxy
+"Route all" mode (iran server becomes a pure relay; anything installed on it,
+e.g. 3x-ui / Pasarguard / apt, reaches the internet through the remote):
+  --route-all            enable on BOTH nodes (adds exit: to new or existing configs)
+  --route-all=off        disable again (removes the exit: line)
   --binary-dir=DIR       use prebuilt tuunel/tunnelctl from DIR
   --url=BASE_URL         download BASE_URL/tuunel-linux-ARCH.tar.gz + BASE_URL/SHA256SUMS
   --version=VERSION      with an embedded release base URL: install that release
@@ -68,7 +72,7 @@ EOF
 }
 ROLE=""; PEER_KEY=""; EDGE_ADDR=""; LOCAL_IP=""; PEER_IP=""; PORTS="tcp=443,quic=443,wss=8443,udp=51900"
 BIN_DIR=""; URL=""; START=1; FORCE=0; UNINSTALL=0; PURGE=0
-PROXY=default; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""
+ROUTE_ALL=""; PROXY=default; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""
 REL_VERSION=""; SIGNING_KEY=""; REQUIRE_SIG=0; CA_FILE=""; SYSTEMD=1; ROOT=""
 arg() { printf '%s' "${1#*=}"; }
 while [ $# -gt 0 ]; do
@@ -79,6 +83,7 @@ while [ $# -gt 0 ]; do
     --local-ip=*) LOCAL_IP=$(arg "$1");; --peer-ip=*) PEER_IP=$(arg "$1");;
     --ports=*) PORTS=$(arg "$1");;
     --proxy) PROXY=add;; --no-proxy) PROXY=no;;
+    --route-all) ROUTE_ALL=on;; --route-all=on) ROUTE_ALL=on;; --route-all=off) ROUTE_ALL=off;;
     --proxy-port=*) PROXY_PORT=$(arg "$1");; --proxy-user=*) PROXY_USER=$(arg "$1");; --proxy-pass=*) PROXY_PASS=$(arg "$1");;
     --binary-dir=*) BIN_DIR=$(arg "$1");; --binary-dir) BIN_DIR=$2; shift;;
     --url=*) URL=$(arg "$1");; --url) URL=$2; shift;;
@@ -234,6 +239,7 @@ PUB=$("$BINDIR/tuunel" pubkey -key "$KEY")
 printf '%s\n' "$PUB" >"$ETC/node.pub"; chmod 0644 "$ETC/node.pub"
 
 say "4/8 configuration"
+PX_BACKEND=41080   # proxy backend port on the remote's tunnel address (tunnel-internal)
 rand_hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
 port_busy() { ss -Hltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$1\$"; }
 pick_port() {   # random free TCP port that is not a carrier port
@@ -245,6 +251,7 @@ pick_port() {   # random free TCP port that is not a carrier port
   done
   printf '54781'
 }
+[ -z "$ROUTE_ALL" ] && [ "$FORCE" = 1 ] && grep -qs '^exit:' "$CFG" && ROUTE_ALL=on   # keep route-all across --force-config
 # previous proxy settings (kept across --force-config so client settings stay valid)
 OLD_PX=""
 [ -f "$CFG" ] && OLD_PX=$(sed -n 's/^proxy: {listen: "[^"]*:\([0-9]*\)", upstream: "[^"]*", users: \[{username: "\([^"]*\)", password: "\([^"]*\)"}\]}.*/\1 \2 \3/p' "$CFG" | head -1)
@@ -253,9 +260,10 @@ proxy_line() {   # $1 = role, $2 = peer tunnel IP or own tunnel IP
     set -- "$1" "$2" $OLD_PX
     local pp=${PROXY_PORT:-${3:-}} pu=${PROXY_USER:-${4:-}} pw=${PROXY_PASS:-${5:-}}
     [ -n "$pp" ] || pp=$(pick_port); [ -n "$pu" ] || pu=user$(rand_hex 3); [ -n "$pw" ] || pw=$(rand_hex 12)
-    echo "proxy: {listen: \"0.0.0.0:$pp\", upstream: \"$2:1080\", users: [{username: \"$pu\", password: \"$pw\"}]}   # SOCKS5+HTTP exit proxy, see: tunnelctl proxy"
+    echo "proxy: {listen: \"0.0.0.0:$pp\", upstream: \"$2:$PX_BACKEND\", users: [{username: \"$pu\", password: \"$pw\"}]}   # SOCKS5+HTTP exit proxy, see: tunnelctl proxy"
   else
-    echo "proxy: {listen: \"$2:1080\"}   # exit side of the edge's proxy (reachable only through the tunnel)"
+    port_busy "$PX_BACKEND" && warn "port $PX_BACKEND is already used on this host (another proxy/Xray?): change it in BOTH configs (proxy.listen here, proxy.upstream on the edge)"
+    echo "proxy: {listen: \"$2:$PX_BACKEND\"}   # exit side of the edge's proxy (reachable only through the tunnel)"
   fi
 }
 carrier_lines() {   # $1 = edge|remote; emitted in --ports order (= preference order)
@@ -282,6 +290,7 @@ gen_config() {
       echo "  tcp: []              # - {listen: \"0.0.0.0:2222\", target: \"$peer:22\"}"
       echo "  udp: []"
       [ "$PROXY" = no ] || proxy_line edge "$peer"
+      [ "$ROUTE_ALL" = on ] && echo "exit: {mode: client}   # route all: outbound traffic of this server leaves through the remote"
       echo "api: {socket: $API_SOCK}"
       echo "log: {level: info}"; } 
   else
@@ -299,6 +308,7 @@ gen_config() {
       echo "    carriers:            # preference order; failover walks this list"
       carrier_lines remote
       [ "$PROXY" = no ] || proxy_line remote "${me%/*}"
+      [ "$ROUTE_ALL" = on ] && echo "exit: {mode: server}   # route all: forward + NAT the edge's internet traffic"
       echo "api: {socket: $API_SOCK}"
       echo "log: {level: info}"; }
   fi
@@ -321,6 +331,14 @@ if [ -f "$CFG" ] && [ "$FORCE" = 0 ]; then
     echo "    added the built-in exit proxy to $CFG"
   elif [ -n "$PROXY_PORT" ] && grep -q '^proxy: {listen: "0.0.0.0:' "$CFG"; then
     sed -i -E "s#^proxy: \{listen: \"0.0.0.0:[0-9]+\"#proxy: {listen: \"0.0.0.0:$PROXY_PORT\"#" "$CFG"; echo "    proxy port set to $PROXY_PORT"
+  fi
+  if [ "$ROUTE_ALL" = on ] && ! grep -q '^exit:' "$CFG"; then
+    cp -p "$CFG" "$CFG.bak.$(date +%Y%m%d%H%M%S)"
+    if grep -q '^listen:' "$CFG"; then echo "exit: {mode: client}   # route all: outbound traffic of this server leaves through the remote" >>"$CFG"
+    else echo "exit: {mode: server}   # route all: forward + NAT the edge's internet traffic" >>"$CFG"; fi
+    echo "    enabled route-all mode in $CFG"
+  elif [ "$ROUTE_ALL" = off ] && grep -q '^exit:' "$CFG"; then
+    cp -p "$CFG" "$CFG.bak.$(date +%Y%m%d%H%M%S)"; sed -i '/^exit:/d' "$CFG"; echo "    disabled route-all mode"
   fi
 elif [ -n "$ROLE" ]; then
   [ -f "$CFG" ] && cp -p "$CFG" "$CFG.bak.$(date +%Y%m%d%H%M%S)"
@@ -407,7 +425,14 @@ if grep -qs '^listen:' "$CFG"; then
     fi
     echo "  show again any time:  tunnelctl proxy"
   fi
+  if grep -qs '^exit: {mode: client' "$CFG"; then
+    echo
+    echo "Route-all: ON. Every outbound connection of this server (panels, Xray, apt, ...) leaves through the remote."
+    echo "  check:  curl -4 -s https://ifconfig.me    (must print the REMOTE's public IP; needs --route-all on the remote too)"
+    echo "  off:    re-run the installer with --route-all=off"
+  fi
 elif [ -f "$CFG" ]; then
   echo "  firewall:     remote node: no inbound port needed (it dials the edge)"
+  grep -qs '^exit: {mode: server' "$CFG" && echo "  route-all:    ON (this node forwards + NATs the edge's internet traffic)"
   grep -qs '^proxy:' "$CFG" && echo "  proxy:        exit side enabled; client settings are shown on the edge: tunnelctl proxy"
 fi

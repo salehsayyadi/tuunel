@@ -27,12 +27,36 @@ curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/insta
 Releases are built by `.github/workflows/release.yml` whenever `VERSION`
 changes on `main`. A specific release: `.../releases/download/v0.9.0/install.sh`.
 
+## Route-all mode: the edge as a pure relay (v0.9.3+)
+
+`--route-all` on both nodes adds `exit: {mode: client}` (edge) and
+`exit: {mode: server}` (remote). Applied by `tuunel exit-up` (systemd
+`ExecStartPost=+`, as root; removed by `exit-down` on stop):
+
+- edge: policy routing. Rule 5200 `fwmark 0x100000` (conntrack reply
+  direction, set by nftables) -> main; 5205 `from <host addresses>` -> main;
+  5206 `ipproto tcp/udp sport <listener ports>` -> main; 5210 private,
+  loopback, link-local, multicast, tunnel and endpoint destinations -> main;
+  5290 everything else -> table 7120 (`default dev tun0 src 10.200.0.1`). So
+  every connection the host or its containers initiate leaves through the
+  tunnel; replies to inbound connections (SSH, panels, carriers, proxy) keep
+  the normal route, including connections that existed before activation.
+  IPv6 outbound is answered unreachable (no leak) unless `exit.ipv6: direct`.
+  MSS is clamped on forwarded traffic; non-tunnel sources entering the tunnel
+  are masqueraded.
+- remote: `ip_forward=1`, masquerade of the peers' tunnel addresses, MSS
+  clamping, and `iptables FORWARD` accept rules for tun0 when iptables exists.
+- tunnel down => the edge's outbound traffic stops (kill switch); service
+  stopped => all rules removed, normal routing.
+
+Config: `exit: {mode: client|server, peer: NAME, table: 7120, exclude: [CIDR], ipv6: block|direct, source: [CIDR]}`.
+
 ## Built-in exit proxy (v0.9.2+)
 
 New configs get a SOCKS5 + HTTP proxy (one port) without installing any panel:
 clients connect to `EDGE_IP:PORT`; the edge authenticates them and relays every
 request through the tunnel to a backend on the remote's tunnel address
-(`10.200.0.2:1080`), which resolves DNS and dials the destination. The edge port
+(`10.200.0.2:41080`), which resolves DNS and dials the destination. The edge port
 is a random free port 20000-60999 with a random username/password (kept across
 `--force-config`); show it with `sudo tunnelctl proxy` on the edge
 (`socks5://`, `http://` and Telegram `tg://socks` links).
@@ -46,9 +70,9 @@ Config:
 
 ```yaml
 # edge
-proxy: {listen: "0.0.0.0:43003", upstream: "10.200.0.2:1080", users: [{username: "u", password: "p"}]}
+proxy: {listen: "0.0.0.0:43003", upstream: "10.200.0.2:41080", users: [{username: "u", password: "p"}]}
 # remote
-proxy: {listen: "10.200.0.2:1080"}
+proxy: {listen: "10.200.0.2:41080"}
 ```
 
 The order of `--ports` is the carrier preference order on the remote; carriers

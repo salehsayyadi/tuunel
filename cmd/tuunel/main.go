@@ -6,12 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/salehsayyadi/tuunel/internal/config"
 	"github.com/salehsayyadi/tuunel/internal/daemon"
+	"github.com/salehsayyadi/tuunel/internal/exitnode"
 	"github.com/salehsayyadi/tuunel/internal/mtu"
 	"github.com/salehsayyadi/tuunel/internal/tun"
 	"github.com/salehsayyadi/tuunel/internal/tunnel"
@@ -57,6 +59,31 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("configuration OK: node=%s mtu=%d (%s) peers=%d listeners=%d\n", cfg.Node.ID, plan.MTU.TunMTU, plan.MTU.Mode, len(cfg.Peers), len(cfg.Listen))
+	case "exit-up", "exit-down":
+		// run as root by systemd (ExecStartPost=+ / ExecStopPost=+); never fails the unit
+		fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
+		cfgPath := fs.String("config", "/etc/tuunel/config.yaml", "configuration file")
+		_ = fs.Parse(os.Args[2:])
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "exit:", err)
+			return
+		}
+		var eps []netip.Addr
+		if plan, err := daemon.BuildPlan(cfg, nil); err == nil {
+			eps = plan.Endpoints
+		}
+		a := exitnode.New(cfg, eps)
+		if os.Args[1] == "exit-down" {
+			if cfg.Exit.Mode != "" {
+				a.Down()
+				fmt.Fprintln(os.Stderr, "exit: rules removed")
+			}
+			return
+		}
+		if err := a.Up(); err != nil {
+			fmt.Fprintln(os.Stderr, "exit: ERROR:", err)
+		}
 	case "genkey":
 		priv, pub, err := daemon.GenKey()
 		if err != nil {
@@ -94,6 +121,8 @@ func usage() {
 
 Commands:
   run     -config FILE   run the tunnel daemon
+  exit-up / exit-down -config FILE
+                         apply/remove "route all" exit networking (run by systemd as root)
   check   -config FILE   validate configuration, keys, MTU and routing plan
   genkey                 print a new private key (public key on stderr)
   pubkey  -key FILE      print the public key for a private key file

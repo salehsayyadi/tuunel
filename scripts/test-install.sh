@@ -66,6 +66,14 @@ echo "== 3 generated configs in the netns lab"
 if t python3 tests/lab/install_check.py "$E" "$R" "$W/install_check.json" >"$W/ic.log" 2>&1; then ok "installer-generated edge/remote tunnel works (up, traffic, doctor, failover)"
 else bad "installer-generated configs in lab"; tail -30 "$W/ic.log"; fi
 cp "$W/install_check.json" "${RESULTS:-/tmp}/install_check.json" 2>/dev/null
+# route-all (exit) mode with installer-generated configs
+E2=$W/edge-ra; R2=$W/remote-ra
+t bash scripts/install.sh --root="$E2" --role=edge --route-all --binary-dir="$BIN" >/dev/null 2>&1
+t bash scripts/install.sh --root="$R2" --role=remote --route-all --edge-address=192.0.2.2 --peer-key="$(cat "$E2/etc/tuunel/node.pub")" --binary-dir="$BIN" >/dev/null 2>&1
+t bash scripts/install.sh --root="$E2" --peer-key="$(cat "$R2/etc/tuunel/node.pub")" --binary-dir="$BIN" >/dev/null 2>&1
+if t python3 tests/lab/exit_check.py "$E2" "$R2" "$W/exit_check.json" >"$W/ec.log" 2>&1; then ok "route-all: edge traffic exits via remote, inbound + pre-existing connections keep working, IPv6 blocked, clean exit-down"
+else bad "route-all lab"; tail -30 "$W/ec.log"; fi
+cp "$W/exit_check.json" "${RESULTS:-/tmp}/exit_check.json" 2>/dev/null
 
 echo "== 4 reproducible, signed release"
 ssh-keygen -q -t ed25519 -N '' -C tuunel-test-release -f "$W/sign" >/dev/null

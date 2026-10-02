@@ -83,6 +83,12 @@ func BuildPlan(cfg *config.Config, detectMTU func(string) (int, error)) (*Plan, 
 			ep.AllowedIPs = append(ep.AllowedIPs, pf)
 			allowed = append(allowed, pf)
 		}
+		if cfg.Exit.Mode == "client" && (cfg.Exit.Peer == pc.Name || cfg.Exit.Peer == "") {
+			// internet exit through this peer: it may carry any IPv4 destination
+			// (and return any source). Not added to the main routing table:
+			// policy routing ("tuunel exit-up") selects what enters the tunnel.
+			ep.AllowedIPs = append(ep.AllowedIPs, netip.MustParsePrefix("0.0.0.0/0"))
+		}
 		for ei, e := range pc.Endpoints {
 			rank := ei
 			if e.Priority != 0 {

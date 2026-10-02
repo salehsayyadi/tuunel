@@ -227,6 +227,19 @@ firewall hint printed default ports instead of the configured ones; carrier
 preference order could not be chosen at install time (now = `--ports` order).
 Still open: QUIC through Iranian DPI; restricted-network soak.
 
+v0.9.2 real deployment follow-up: the built-in proxy worked end to end
+(Windows curl / Telegram -> edge:54781 -> remote) after moving the remote
+backend off port 1080, which Xray already used on that host; v0.9.3 uses
+41080 by default and warns when it is taken.
+
+v0.9.3 route-all (`tests/lab/exit_check.py`, installer-generated configs):
+edge-originated TCP and ICMP reach an "internet" namespace only through the
+tunnel, inbound HTTP to the edge and a TCP connection opened before activation
+keep working, IPv6 outbound is blocked, `exit-down` leaves no rules. The lab
+kernel has no nftables NAT, so the remote's masquerade itself was not
+exercised there (the test routes the tunnel subnet back instead); it must be
+confirmed on a real host with `curl -4 ifconfig.me` on the edge.
+
 ### RESTRICTED_NETWORK_TEST: BLOCKED
 
 Reason: no authorized restricted/filtered network was available. No claim
