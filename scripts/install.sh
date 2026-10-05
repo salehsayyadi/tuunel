@@ -234,8 +234,8 @@ if [ -n "$LICENSE_SERVER" ] && [ "$UNINSTALL" = 0 ]; then
     [ "$PORTS_GIVEN" = 1 ] || [ -z "$(lic_val PORTS)" ] || PORTS=$(lic_val PORTS)
   elif [ "$PORTS_GIVEN" = 0 ]; then
     if [ -n "$(lic_val PORTS)" ]; then PORTS=$(lic_val PORTS)
-    else   # first free port of each carrier (443 is often taken by panels)
-      PORTS="tcp=$(free_port tcp 443 2083 2053 8443 9443),wss=$(free_port tcp 2087 2096 8880 9444),udp=$(free_port udp 51900 51910 51920),quic=$(free_port udp 443 51901 51911)"
+    else   # first free port of each carrier (443 last: often taken by panels or DPI-filtered in Iranian DCs)
+      PORTS="tcp=$(free_port tcp 2083 2053 8443 9443 443),wss=$(free_port tcp 2087 2096 8880 9444),udp=$(free_port udp 51900 51910 51920),quic=$(free_port udp 51901 51911 443)"
     fi
   fi
 fi
@@ -550,6 +550,9 @@ Next steps:
 MSG
 if [ "$LIC_MODE" = 1 ] && grep -qs REPLACE_ME "$CFG"; then
   echo "  - now run the FOREIGN server's command (with the same code); this server connects automatically within ~1 minute"
+elif [ "$LIC_MODE" = 1 ] && [ "$ROLE" = remote ]; then
+  echo "  - the Iran server picks up this node's key within ~1 minute (tuunel-license.timer); a FAIL in the doctor above"
+  echo "    right after install is normal. Check again in a minute:  tunnelctl doctor"
 elif grep -qs REPLACE_ME "$CFG"; then
   echo "  - on the other node run: tuunel pubkey -key $KEY   (or cat $ETC/node.pub)"
   echo "  - then here:  sudo bash install.sh --peer-key=<OTHER_NODE_PUBLIC_KEY>   (or re-run the one-line command with --peer-key=...)"
