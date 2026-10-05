@@ -8,13 +8,16 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime/pprof"
 	"syscall"
+	"time"
 
 	"github.com/salehsayyadi/tuunel/internal/config"
 	"github.com/salehsayyadi/tuunel/internal/daemon"
 	"github.com/salehsayyadi/tuunel/internal/exitnode"
+	"github.com/salehsayyadi/tuunel/internal/license"
 	"github.com/salehsayyadi/tuunel/internal/mtu"
 	"github.com/salehsayyadi/tuunel/internal/tun"
 	"github.com/salehsayyadi/tuunel/internal/tunnel"
@@ -91,6 +94,8 @@ func main() {
 		if err := a.Up(); err != nil {
 			fmt.Fprintln(os.Stderr, "exit: ERROR:", err)
 		}
+	case "license":
+		licenseCmd(os.Args[2:])
 	case "genkey":
 		priv, pub, err := daemon.GenKey()
 		if err != nil {
@@ -135,6 +140,9 @@ Commands:
   pubkey  -key FILE      print the public key for a private key file
   genpsk                 print a new optional pre-shared key
   version                print version
+  license status         show the activation license of this server
+  license sync -config FILE
+                         refresh the license online and pair with the peer (root; systemd timer)
   server|client          legacy MVP mode: single TUN over TCP+TLS (see README)
 `)
 }
@@ -193,5 +201,71 @@ func legacy(mode string) {
 	}
 	if err != nil {
 		fatal(err.Error())
+	}
+}
+
+func licenseCmd(args []string) {
+	sub := "status"
+	if len(args) > 0 {
+		sub, args = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("license", flag.ExitOnError)
+	cfg := fs.String("config", "/etc/tuunel/config.yaml", "configuration file")
+	file := fs.String("file", license.File, "license file")
+	restart := fs.Bool("restart", true, "sync: restart the tuunel service when the peer key changed")
+	_ = fs.Parse(args)
+	license.File = *file
+	switch sub {
+	case "status":
+		st := license.Check()
+		if !st.Required {
+			fmt.Println("license: not required (unlicensed build)")
+			return
+		}
+		if st.Payload != nil {
+			p := st.Payload
+			fmt.Printf("license: id=%d role=%s server=%s\n", p.ID, p.Role, p.Server)
+			fmt.Printf("expires: %s\n", time.Unix(p.Expires, 0).UTC().Format(time.RFC3339))
+		}
+		if !st.Valid {
+			fmt.Println("status:  INVALID:", st.Reason)
+			os.Exit(1)
+		}
+		fmt.Printf("status:  valid, %s left\n", st.Left.Round(time.Second))
+	case "machine":
+		m, err := license.Machine()
+		if err != nil {
+			fatal(err.Error())
+		}
+		fmt.Println(m)
+	case "sync":
+		if !license.Required() {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		res, err := license.Sync(ctx, *cfg)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if res.Message != "" {
+			fmt.Println("license server:", res.Message)
+		}
+		if res.Refreshed {
+			fmt.Println("license refreshed")
+		}
+		if res.PeerUpdated {
+			fmt.Println("peer public key installed from the license server")
+			if *restart {
+				if out, err := exec.Command("systemctl", "restart", "tuunel").CombinedOutput(); err != nil {
+					fmt.Fprintln(os.Stderr, "systemctl restart tuunel:", err, string(out))
+				}
+			}
+		}
+		if res.Revoked {
+			os.Exit(3)
+		}
+	default:
+		fatal("license: unknown subcommand " + sub + " (status, sync, machine)")
 	}
 }

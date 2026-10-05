@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/salehsayyadi/tuunel/internal/config"
 	"github.com/salehsayyadi/tuunel/internal/engine"
 	"github.com/salehsayyadi/tuunel/internal/forwarding"
+	"github.com/salehsayyadi/tuunel/internal/license"
 	"github.com/salehsayyadi/tuunel/internal/mtu"
 	"github.com/salehsayyadi/tuunel/internal/netcfg"
 	"github.com/salehsayyadi/tuunel/internal/proxy"
@@ -40,6 +42,13 @@ func Run(configPath string) error {
 	}
 	log := NewLogger(cfg.Log)
 	slog.SetDefault(log)
+	sigCtx, sigStop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer sigStop()
+	if license.Required() {
+		if err := license.Wait(sigCtx, log); err != nil {
+			return nil // stopped while waiting for a license
+		}
+	}
 	key, warn, err := LoadPrivateKey(cfg.Security.PrivateKeyFile)
 	if err != nil {
 		return err
@@ -110,8 +119,18 @@ func Run(configPath string) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := context.WithCancel(sigCtx)
 	defer stop()
+	var licErr error
+	var licMu sync.Mutex
+	if license.Required() {
+		go license.Watch(ctx, log, func(e error) {
+			licMu.Lock()
+			licErr = e
+			licMu.Unlock()
+			stop()
+		})
+	}
 
 	fw := forwarding.New(log)
 	defer fw.Close()
@@ -174,5 +193,10 @@ func Run(configPath string) error {
 	}()
 	err = eng.Run(ctx)
 	log.Info("shutting down")
+	licMu.Lock()
+	defer licMu.Unlock()
+	if licErr != nil {
+		return licErr // non-zero exit: systemd restarts the unit, which then waits for a license
+	}
 	return err
 }

@@ -27,6 +27,24 @@ curl -fsSL https://github.com/salehsayyadi/tuunel/releases/latest/download/insta
 Releases are built by `.github/workflows/release.yml` whenever `VERSION`
 changes on `main`. A specific release: `.../releases/download/v0.9.0/install.sh`.
 
+## Licensed install with an activation code (v0.9.5+)
+
+A license server (the bot-maker's "Tunnel license" menu) serves a patched
+installer and binaries with its Ed25519 public key embedded. Two commands set
+up everything (keys, ports, proxy, route-all):
+
+```bash
+curl -fsSL https://LICENSE-DOMAIN/install.sh | sudo bash -s -- --role=edge   --license=TUN-XXXX-XXXX-XXXX
+curl -fsSL https://LICENSE-DOMAIN/install.sh | sudo bash -s -- --role=remote --license=TUN-XXXX-XXXX-XXXX
+```
+
+The installer activates (`POST /api/activate`), downloads with a one-time
+token, writes `/etc/tuunel/license` (signed, bound to the machine id), registers
+the node key/ports, and installs `tuunel-license.timer` (every 60 s:
+`tuunel license sync` refreshes the license and installs the peer's key). A
+licensed binary waits until the license is valid and stops the tunnel when it
+expires or is revoked. Official (unpatched) builds never require a license.
+
 ## Speed tuning (v0.9.4+)
 
 - The installer applies system-wide network tuning unless `--no-tune`: BBR congestion control (when the kernel has it) with the fq qdisc, 64 MiB socket buffer limits, `tcp_mtu_probing=1`, `tcp_slow_start_after_idle=0` (`/etc/sysctl.d/90-tuunel.conf`, removed by `--uninstall`).

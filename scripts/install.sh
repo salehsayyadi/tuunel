@@ -11,6 +11,7 @@ umask 022
 EMBED_BASE_URL="@TUUNEL_BASE_URL@"      # e.g. https://github.com/OWNER/REPO/releases/download
 EMBED_VERSION="@TUUNEL_VERSION@"        # release this installer belongs to
 EMBED_SIGNER="@TUUNEL_SIGNER@"          # ssh public key that signs SHA256SUMS (optional)
+EMBED_LICENSE_SERVER="@TUUNEL_LICENSE_SERVER@"   # set by a tuunel license server serving this script
 # Official public releases (used when this script is piped from the repository
 # without --url and no local binaries exist): latest GitHub release assets.
 DEFAULT_RELEASE_URL="https://github.com/salehsayyadi/tuunel/releases/latest/download"
@@ -50,6 +51,9 @@ with SOCKS5 or HTTP proxy settings and their traffic leaves from the remote:
 e.g. 3x-ui / Pasarguard / apt, reaches the internet through the remote):
   --route-all            enable on BOTH nodes (adds exit: to new or existing configs)
   --route-all=off        disable again (removes the exit: line)
+Activation (installers served by a tuunel license server):
+  --license=CODE         activation code (asked interactively when missing; kept for upgrades)
+  --license-server=URL   license server base URL (normally embedded in the served installer)
 Speed:
   --streams=N            remote: parallel TCP connections for the tcp carrier
                          (1-16, default 4 for new configs; also updates an
@@ -81,6 +85,7 @@ EOF
 ROLE=""; PEER_KEY=""; EDGE_ADDR=""; LOCAL_IP=""; PEER_IP=""; PORTS="tcp=443,quic=443,wss=8443,udp=51900"
 BIN_DIR=""; URL=""; START=1; FORCE=0; UNINSTALL=0; PURGE=0
 ROUTE_ALL=""; STREAMS=""; TUNE=1; PROXY=default; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""
+LICENSE=""; LICENSE_SERVER=""; LIC_MODE=0; PORTS_GIVEN=0
 REL_VERSION=""; SIGNING_KEY=""; REQUIRE_SIG=0; CA_FILE=""; SYSTEMD=1; ROOT=""
 arg() { printf '%s' "${1#*=}"; }
 while [ $# -gt 0 ]; do
@@ -89,7 +94,9 @@ while [ $# -gt 0 ]; do
     --peer-key=*) PEER_KEY=$(arg "$1");; --peer-key) PEER_KEY=$2; shift;;
     --edge-address=*) EDGE_ADDR=$(arg "$1");; --edge-address) EDGE_ADDR=$2; shift;;
     --local-ip=*) LOCAL_IP=$(arg "$1");; --peer-ip=*) PEER_IP=$(arg "$1");;
-    --ports=*) PORTS=$(arg "$1");;
+    --ports=*) PORTS=$(arg "$1"); PORTS_GIVEN=1;;
+    --license=*) LICENSE=$(arg "$1");; --license) LICENSE=$2; shift;;
+    --license-server=*) LICENSE_SERVER=$(arg "$1");;
     --proxy) PROXY=add;; --no-proxy) PROXY=no;;
     --streams=*) STREAMS=${1#*=};; --no-tune) TUNE=0;;
     --route-all) ROUTE_ALL=on;; --route-all=on) ROUTE_ALL=on;; --route-all=off) ROUTE_ALL=off;;
@@ -141,7 +148,8 @@ sc() { [ "$SYSTEMD" = 1 ] || return 0; timeout 90 systemctl "$@"; }   # bounded 
 if [ "$UNINSTALL" = 1 ]; then
   say "uninstalling tuunel"
   sc disable --now tuunel >/dev/null 2>&1 || true
-  rm -f "$UNIT" "$BINDIR/tuunel" "$BINDIR/tunnelctl"
+  sc disable --now tuunel-license.timer >/dev/null 2>&1 || true
+  rm -f "$UNIT" "$BINDIR/tuunel" "$BINDIR/tunnelctl" "$ROOT/etc/systemd/system/tuunel-license.service" "$ROOT/etc/systemd/system/tuunel-license.timer"
   if [ -z "$ROOT" ] && [ -f /etc/sysctl.d/90-tuunel.conf ]; then
     rm -f /etc/sysctl.d/90-tuunel.conf /etc/modules-load.d/tuunel.conf
     say "removed network tuning (/etc/sysctl.d/90-tuunel.conf); kernel defaults return after reboot"
@@ -169,6 +177,68 @@ done
 [ -z "$STREAMS" ] || { printf '%s' "$STREAMS" | grep -Eq '^[0-9]{1,2}$' && [ "$STREAMS" -ge 1 ] && [ "$STREAMS" -le 16 ]; } || die "--streams must be 1-16"
 [ -z "$PEER_KEY" ] || printf '%s' "$PEER_KEY" | grep -Eq '^[A-Za-z0-9+/]{43}=$' || die "--peer-key must be a 44-character base64 public key (tuunel pubkey)"
 say "host: $OSNAME, arch $ARCH"
+
+# ------------------------------------------------------------------ activation (licensed installers)
+embedded "$EMBED_LICENSE_SERVER" && [ -z "$LICENSE_SERVER" ] && LICENSE_SERVER=$EMBED_LICENSE_SERVER
+lic_val() { printf '%s\n' "$LIC_RESP" | sed -n "s/^$1=//p" | head -1; }
+lic_post() {   # $1 = path, rest: curl --data-urlencode args; prints the reply
+  local path=$1; shift
+  local ca=(); [ -n "$CA_FILE" ] && ca=(--cacert "$CA_FILE")
+  # IPv4 first: the edge address the server records must be dialable by the remote
+  curl -4 -sS --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 --retry 2 "${ca[@]}" -X POST "$@" "${LICENSE_SERVER%/}$path" 2>/dev/null \
+    || curl -sS --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 --retry 1 "${ca[@]}" -X POST "$@" "${LICENSE_SERVER%/}$path"
+}
+free_port() {   # $1 = tcp|udp, rest: candidates; prints the first free one
+  local proto=$1 p; shift
+  for p in "$@"; do
+    if [ "$proto" = tcp ]; then ss -Hltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$p\$" || { echo "$p"; return; }
+    else ss -Hlun 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$p\$" || { echo "$p"; return; }; fi
+  done
+  echo "$1"
+}
+if [ -n "$LICENSE_SERVER" ] && [ "$UNINSTALL" = 0 ]; then
+  LIC_MODE=1
+  case "$LICENSE_SERVER" in https://*) ;; *) die "--license-server must be https://";; esac
+  command -v curl >/dev/null || die "curl is required"
+  if [ -z "$ROLE" ] && [ -f "$CFG" ]; then grep -q '^listen:' "$CFG" && ROLE=edge || ROLE=remote; fi
+  case "$ROLE" in edge|iran) ROLE=edge;; remote|foreign|kharej) ROLE=remote;; *) die "--role=edge (Iran server) or --role=remote (foreign server) is required";; esac
+  [ -z "$LICENSE" ] && [ -s "$ETC/license.code" ] && LICENSE=$(cat "$ETC/license.code")
+  if [ -z "$LICENSE" ] && [ -r /dev/tty ]; then
+    printf 'Activation code / کد فعال‌سازی: ' >/dev/tty; read -r LICENSE </dev/tty || true
+  fi
+  LICENSE=$(printf '%s' "$LICENSE" | tr -d ' \r\n')
+  [ -n "$LICENSE" ] || die "an activation code is required: --license=CODE"
+  MIDF=""   # same lookup order as the daemon (internal/license)
+  if [ -n "${TUUNEL_MACHINE_ID_FILE:-}" ]; then MIDF=$TUUNEL_MACHINE_ID_FILE
+  else for f in /etc/machine-id /var/lib/dbus/machine-id /etc/tuunel/machine-id; do [ -s "$f" ] && { MIDF=$f; break; }; done; fi
+  if [ -z "$MIDF" ]; then
+    MIDF=/etc/tuunel/machine-id; install -d -m 0755 /etc/tuunel
+    (umask 022; od -An -N16 -tx1 /dev/urandom | tr -d ' \n' >"$MIDF"); echo >>"$MIDF"
+  fi
+  [ -s "$MIDF" ] || die "no machine id ($MIDF)"
+  MACHINE=$(printf 'tuunel:%s' "$(tr -d '[:space:]' <"$MIDF")" | sha256sum | cut -c1-32)
+  say "activating with $LICENSE_SERVER"
+  LIC_RESP=$(lic_post /api/activate --data-urlencode "code=$LICENSE" --data-urlencode "role=$ROLE" \
+    --data-urlencode "machine=$MACHINE" --data-urlencode "host=$(hostname -s 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null)") || die "cannot reach the license server $LICENSE_SERVER"
+  first=$(printf '%s\n' "$LIC_RESP" | head -1)
+  [ "$first" = OK ] || die "activation failed: ${first#ERR }"
+  LIC_TOKEN=$(lic_val LICENSE); [ -n "$LIC_TOKEN" ] || die "activation failed: no license in reply"
+  echo "    activated: $(lic_val INFO)"
+  [ -z "$URL" ] && [ -z "$BIN_DIR" ] && URL="${LICENSE_SERVER%/}/dl/$(lic_val DL)"
+  [ "$(lic_val PROXY)" = 0 ] && [ "$PROXY" = default ] && PROXY=no
+  [ "$(lic_val ROUTE_ALL)" = 1 ] && [ -z "$ROUTE_ALL" ] && ROUTE_ALL=on
+  [ -z "$STREAMS" ] && [ -n "$(lic_val STREAMS)" ] && STREAMS=$(lic_val STREAMS)
+  if [ "$ROLE" = remote ]; then
+    [ -n "$PEER_KEY" ] || PEER_KEY=$(lic_val PEER_KEY)
+    [ -n "$EDGE_ADDR" ] || EDGE_ADDR=$(lic_val EDGE_ADDR)
+    [ "$PORTS_GIVEN" = 1 ] || [ -z "$(lic_val PORTS)" ] || PORTS=$(lic_val PORTS)
+  elif [ "$PORTS_GIVEN" = 0 ]; then
+    if [ -n "$(lic_val PORTS)" ]; then PORTS=$(lic_val PORTS)
+    else   # first free port of each carrier (443 is often taken by panels)
+      PORTS="tcp=$(free_port tcp 443 2083 2053 8443 9443),wss=$(free_port tcp 2087 2096 8880 9444),udp=$(free_port udp 51900 51910 51920),quic=$(free_port udp 443 51901 51911)"
+    fi
+  fi
+fi
 
 # ------------------------------------------------------------------ binaries
 SRC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)
@@ -369,6 +439,42 @@ else
 fi
 [ -f "$CFG" ] && { chown "root:$OWN" "$CFG"; chmod 0640 "$CFG"; }
 
+if [ "$LIC_MODE" = 1 ]; then
+  printf '%s\n' "$LIC_TOKEN" >"$ETC/license.tmp" && mv -f "$ETC/license.tmp" "$ETC/license"
+  chown "root:$OWN" "$ETC/license"; chmod 0640 "$ETC/license"
+  (umask 077; printf '%s\n' "$LICENSE" >"$ETC/license.code")
+  out=$("$BINDIR/tuunel" license status -file "$ETC/license" 2>&1) || die "license check failed: $out"
+  echo "    $(printf '%s\n' "$out" | tail -1)"
+  REG_PORTS=$(sed -n 's/.*carrier: *\([a-z]*\), *address: *"[^"]*:\([0-9]*\)".*/\1=\2/p' "$CFG" 2>/dev/null | paste -sd, -)
+  PXI=$(sed -n 's/^proxy: {listen: "[^"]*:\([0-9]*\)", upstream: "[^"]*", users: \[{username: "\([^"]*\)", password: "\([^"]*\)"}\]}.*/\1:\2:\3/p' "$CFG" 2>/dev/null | head -1)
+  LIC_RESP=$(lic_post /api/register --data-urlencode "license=$LIC_TOKEN" --data-urlencode "machine=$MACHINE" \
+    --data-urlencode "pubkey=$PUB" --data-urlencode "ports=$REG_PORTS" --data-urlencode "proxy=$PXI" \
+    --data-urlencode "version=$("$BINDIR/tuunel" version 2>/dev/null | head -1)") || LIC_RESP="ERR license server unreachable"
+  first=$(printf '%s\n' "$LIC_RESP" | head -1)
+  if [ "$first" = OK ]; then echo "    registered with the license server"; else warn "registration: ${first#ERR }"; fi
+  if [ "$SYSTEMD" = 1 ]; then
+    cat >/etc/systemd/system/tuunel-license.service <<UNIT
+[Unit]
+Description=tuunel license refresh and peer pairing
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=$BINDIR/tuunel license sync -config $CFG
+UNIT
+    cat >/etc/systemd/system/tuunel-license.timer <<UNIT
+[Unit]
+Description=tuunel license refresh timer
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=60s
+AccuracySec=5s
+[Install]
+WantedBy=timers.target
+UNIT
+    sc daemon-reload; sc enable --now tuunel-license.timer >/dev/null 2>&1 || warn "could not enable tuunel-license.timer"
+  fi
+fi
+
 say "5/8 systemd unit"
 install -d -m 0755 "$(dirname "$UNIT")"
 install -m 0644 "$PKG/systemd/tuunel.service" "$UNIT"
@@ -442,7 +548,9 @@ This node's public key (give it to the other node):
     $PUB
 Next steps:
 MSG
-if grep -qs REPLACE_ME "$CFG"; then
+if [ "$LIC_MODE" = 1 ] && grep -qs REPLACE_ME "$CFG"; then
+  echo "  - now run the FOREIGN server's command (with the same code); this server connects automatically within ~1 minute"
+elif grep -qs REPLACE_ME "$CFG"; then
   echo "  - on the other node run: tuunel pubkey -key $KEY   (or cat $ETC/node.pub)"
   echo "  - then here:  sudo bash install.sh --peer-key=<OTHER_NODE_PUBLIC_KEY>   (or re-run the one-line command with --peer-key=...)"
 fi
