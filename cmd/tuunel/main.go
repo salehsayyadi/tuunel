@@ -21,6 +21,7 @@ import (
 	"github.com/salehsayyadi/tuunel/internal/mtu"
 	"github.com/salehsayyadi/tuunel/internal/tun"
 	"github.com/salehsayyadi/tuunel/internal/tunnel"
+	"github.com/salehsayyadi/tuunel/internal/underlay"
 )
 
 func main() {
@@ -94,6 +95,24 @@ func main() {
 		if err := a.Up(); err != nil {
 			fmt.Fprintln(os.Stderr, "exit: ERROR:", err)
 		}
+	case "underlay-up", "underlay-down":
+		// run as root by systemd (ExecStartPre=+ / ExecStopPost=+); never fails the unit
+		fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
+		cfgPath := fs.String("config", "/etc/tuunel/config.yaml", "configuration file")
+		_ = fs.Parse(os.Args[2:])
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "underlay:", err)
+			return
+		}
+		if os.Args[1] == "underlay-down" {
+			underlay.Down(cfg, nil)
+			return
+		}
+		logf := func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
+		if err := underlay.Up(cfg, nil, logf); err != nil {
+			fmt.Fprintln(os.Stderr, "underlay: ERROR:", err)
+		}
 	case "license":
 		licenseCmd(os.Args[2:])
 	case "genkey":
@@ -133,6 +152,7 @@ func usage() {
 
 Commands:
   run     -config FILE   run the tunnel daemon
+  underlay-up / underlay-down -config FILE   (GRE underlay, run by systemd as root)
   exit-up / exit-down -config FILE
                          apply/remove "route all" exit networking (run by systemd as root)
   check   -config FILE   validate configuration, keys, MTU and routing plan
@@ -255,7 +275,7 @@ func licenseCmd(args []string) {
 			fmt.Println("license refreshed")
 		}
 		if res.PeerUpdated {
-			fmt.Println("peer public key installed from the license server")
+			fmt.Println("peer settings (key/address) updated from the license server")
 			if *restart {
 				if out, err := exec.Command("systemctl", "restart", "tuunel").CombinedOutput(); err != nil {
 					fmt.Fprintln(os.Stderr, "systemctl restart tuunel:", err, string(out))

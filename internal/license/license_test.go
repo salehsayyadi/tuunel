@@ -201,3 +201,28 @@ func TestWatchStops(t *testing.T) {
 		t.Fatal("watch did not stop the tunnel")
 	}
 }
+
+func TestTags(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.yaml")
+	in := "peers:\n  - name: remote\n    endpoints:\n      - name: direct\n        address: 0.0.0.0   # tuunel:remote_addr\n    carriers:\n      - type: udp\n        port: 51900   # tuunel:udp\n" +
+		"underlay:\n  gre:\n    remote: \"0.0.0.0\"   # tuunel:remote_addr\n# address: 1.1.1.1 # tuunel:remote_addr\n"
+	os.WriteFile(p, []byte(in), 0o640)
+	ch, err := applyTags(p, parseTags("remote_addr:5.75.201.163,udp:51910,bad tag:x,tcp:1;rm"))
+	if err != nil || !ch {
+		t.Fatal(ch, err)
+	}
+	b, _ := os.ReadFile(p)
+	got := string(b)
+	for _, want := range []string{"address: 5.75.201.163   # tuunel:remote_addr", "port: 51910   # tuunel:udp", "remote: \"5.75.201.163\"   # tuunel:remote_addr", "# address: 1.1.1.1 # tuunel:remote_addr"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	if ch, _ := applyTags(p, parseTags("remote_addr:5.75.201.163")); ch {
+		t.Fatal("unchanged values must not rewrite")
+	}
+	if configTags(got)["udp"] != "51910" {
+		t.Fatal("configTags")
+	}
+}

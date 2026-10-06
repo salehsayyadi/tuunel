@@ -46,9 +46,30 @@ type Config struct {
 	Forwarding   Forwarding   `yaml:"forwarding"`
 	Proxy        Proxy        `yaml:"proxy"`
 	Exit         Exit         `yaml:"exit"`
+	Underlay     Underlay     `yaml:"underlay"`
 	API          API          `yaml:"api"`
 	Experimental Experimental `yaml:"experimental"`
 	Log          Log          `yaml:"log"`
+}
+
+// Underlay is an optional kernel tunnel the carriers run inside (applied by
+// "tuunel underlay-up" from the systemd unit). GRE passes networks whose DPI
+// stalls encrypted TCP/UDP flows; the tuunel session inside stays encrypted.
+type Underlay struct {
+	GRE GRE `yaml:"gre"`
+}
+
+type GRE struct {
+	Name    string `yaml:"name"`    // device name (default tgre0)
+	Remote  string `yaml:"remote"`  // peer public IPv4; empty or 0.0.0.0 = not configured yet
+	Local   string `yaml:"local"`   // local IPv4 (default: source address towards remote)
+	Address string `yaml:"address"` // inner address with prefix, e.g. 172.31.250.1/30
+	MTU     int    `yaml:"mtu"`     // default 1476
+}
+
+// Active reports whether the GRE underlay is fully configured.
+func (g GRE) Active() bool {
+	return g.Remote != "" && g.Remote != "0.0.0.0" && g.Address != ""
 }
 
 type Node struct {
@@ -358,6 +379,24 @@ func (c *Config) Validate() error {
 	add := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
 	if !nameRe.MatchString(c.Node.ID) {
 		add("node.id must match %s", nameRe)
+	}
+	if g := c.Underlay.GRE; g != (GRE{}) {
+		for _, a := range []string{g.Remote, g.Local} {
+			if a != "" {
+				if ip, err := netip.ParseAddr(a); err != nil || !ip.Is4() {
+					add("underlay.gre: %q must be an IPv4 address", a)
+				}
+			}
+		}
+		if p, err := netip.ParsePrefix(g.Address); err != nil || !p.Addr().Is4() {
+			add("underlay.gre.address %q must be an IPv4 prefix like 172.31.250.1/30", g.Address)
+		}
+		if g.Name != "" && (len(g.Name) > 15 || !nameRe.MatchString(g.Name)) {
+			add("underlay.gre.name %q invalid", g.Name)
+		}
+		if g.MTU != 0 && (g.MTU < 1280 || g.MTU > 9000) {
+			add("underlay.gre.mtu out of range")
+		}
 	}
 	if n := c.Interface.Name; n == "" || len(n) > 15 || !nameRe.MatchString(n) {
 		add("interface.name %q invalid (max 15 chars, [A-Za-z0-9._-])", n)

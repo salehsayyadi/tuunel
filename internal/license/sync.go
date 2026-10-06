@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/salehsayyadi/tuunel/internal/underlay"
 )
 
 // Response is a parsed license-server reply: first line "OK" or
@@ -110,7 +112,9 @@ func Sync(ctx context.Context, configPath string) (SyncResult, error) {
 		return res, err
 	}
 	pub, _ := os.ReadFile(filepath.Join(filepath.Dir(File), "node.pub"))
-	r, err := Post(ctx, p.Server, "/api/check", url.Values{"license": {token}, "machine": {m}, "pubkey": {strings.TrimSpace(string(pub))}})
+	src := sourceTowardsPeer(configPath)
+	form := url.Values{"license": {token}, "machine": {m}, "pubkey": {strings.TrimSpace(string(pub))}, "src": {src}}
+	r, err := Post(ctx, p.Server, "/api/check", form)
 	if err != nil {
 		return res, fmt.Errorf("license server unreachable: %w", err)
 	}
@@ -154,7 +158,92 @@ func Sync(ctx context.Context, configPath string) (SyncResult, error) {
 		}
 		res.PeerUpdated = changed
 	}
+	if cv := r.Values["CFG"]; cv != "" && configPath != "" {
+		changed, err := applyTags(configPath, parseTags(cv))
+		if err != nil {
+			return res, err
+		}
+		if changed {
+			res.PeerUpdated = true
+			// tell the server our underlay source address right away
+			if s2 := sourceTowardsPeer(configPath); s2 != "" && s2 != src {
+				form.Set("src", s2)
+				_, _ = Post(ctx, p.Server, "/api/check", form)
+			}
+		}
+	}
 	return res, nil
+}
+
+// Configuration values the license server may set are marked in the YAML
+// with a trailing "# tuunel:<tag>" comment (written by the licensed installer).
+var (
+	tagLineRe = regexp.MustCompile(`(?m)^([^#\n]*?:[ \t]*)("?)([^"\s#]*)("?)([ \t]+#[ \t]*tuunel:([a-z_]+)\b[^\n]*)$`)
+	tagNameRe = regexp.MustCompile(`^[a-z_]{1,24}$`)
+	tagValRe  = regexp.MustCompile(`^[0-9A-Za-z.:\-]{1,64}$`)
+)
+
+// parseTags parses "tag:value,tag:value" (values may contain no commas).
+func parseTags(s string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range strings.Split(s, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(kv), ":")
+		if ok && tagNameRe.MatchString(k) && tagValRe.MatchString(v) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// configTags returns the current tagged values of a configuration file.
+func configTags(text string) map[string]string {
+	out := map[string]string{}
+	for _, m := range tagLineRe.FindAllStringSubmatch(text, -1) {
+		out[m[6]] = m[3]
+	}
+	return out
+}
+
+func applyTags(path string, vals map[string]string) (bool, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	text := string(b)
+	nt := tagLineRe.ReplaceAllStringFunc(text, func(line string) string {
+		m := tagLineRe.FindStringSubmatch(line)
+		v, ok := vals[m[6]]
+		if !ok || v == m[3] {
+			return line
+		}
+		return m[1] + m[2] + v + m[4] + m[5]
+	})
+	if nt == text {
+		return false, nil
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	_ = os.WriteFile(path+".bak.license", b, st.Mode().Perm())
+	return true, writeAtomic(path, nt, st.Mode().Perm())
+}
+
+// sourceTowardsPeer returns this host's IPv4 towards the paired peer
+// (tag remote_addr), which the peer needs as its GRE remote.
+func sourceTowardsPeer(configPath string) string {
+	if configPath == "" {
+		return ""
+	}
+	b, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	a := configTags(string(b))["remote_addr"]
+	if a == "" || a == "0.0.0.0" {
+		return ""
+	}
+	return underlay.SourceFor(nil, a)
 }
 
 // setPeerKey replaces the (single) peer public key in the configuration if
