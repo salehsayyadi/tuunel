@@ -193,3 +193,28 @@ func TestHandshakeOutOfOrderAccepted(t *testing.T) {
 		t.Fatal("replay accepted")
 	}
 }
+
+func TestSealInPlace(t *testing.T) {
+	sa, sb := pair(t, nil)
+	body := []byte("an inner ip packet")
+	buf := make([]byte, SealHeadroom+len(body), SealHeadroom+len(body)+16)
+	copy(buf[SealHeadroom:], body)
+	msg, err := sa.SealInPlace(buf, InnerIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if &msg[0] != &buf[0] {
+		t.Fatal("SealInPlace reallocated despite enough capacity")
+	}
+	ref, _ := sa.Seal(nil, InnerIP, body) // the formats must be identical
+	if len(ref) != len(msg) {
+		t.Fatalf("length %d != %d", len(msg), len(ref))
+	}
+	typ, got, err := sb.Open(msg)
+	if err != nil || typ != InnerIP || string(got) != string(body) {
+		t.Fatalf("open: %v %d %q", err, typ, got)
+	}
+	if _, _, err := sb.Open(ref); err != nil {
+		t.Fatalf("open reference: %v", err)
+	}
+}

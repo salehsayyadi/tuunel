@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,36 @@ type Device interface {
 	Read([]byte) (int, error)
 	Write([]byte) (int, error)
 	Close() error
+}
+
+// BatchDevice is a Device that moves several packets per system call (the
+// TUN device with kernel offloads). WritePackets needs at least
+// deviceHeadroom bytes in front of every packet and may coalesce packets
+// into the spare capacity of the buffers.
+type BatchDevice interface {
+	Device
+	BatchSize() int
+	ReadPackets(bufs [][]byte, sizes []int, offset int) (int, error)
+	WritePackets(bufs [][]byte, offset int) (int, error)
+}
+
+const (
+	// deviceHeadroom is reserved in front of packets written to a BatchDevice.
+	deviceHeadroom = 16
+	// sealTail is the room left behind a queued packet for the AEAD tag.
+	sealTail = 16
+	// txBatch/rxBatch bound how many packets are handled per carrier/device
+	// system call.
+	txBatch = 64
+	rxBatch = 64
+)
+
+// withHeadroom copies an inner packet into a buffer prepared for
+// session.SealInPlace (headroom in front, tag room behind).
+func withHeadroom(pkt []byte) []byte {
+	b := make([]byte, session.SealHeadroom+len(pkt), session.SealHeadroom+len(pkt)+sealTail)
+	copy(b[session.SealHeadroom:], pkt)
+	return b
 }
 
 type CandidateConfig struct {
@@ -221,6 +252,44 @@ func (e *Engine) Run(ctx context.Context) error {
 }
 
 func (e *Engine) readDevice(ctx context.Context) error {
+	bd, ok := e.cfg.Device.(BatchDevice)
+	if !ok || bd.BatchSize() < 1 {
+		return e.readDeviceSingle(ctx)
+	}
+	bs := bd.BatchSize()
+	bufs, sizes := make([][]byte, bs), make([]int, bs)
+	size := 65535
+	if bs > 1 { // offloads: super-segments are split into packets of at most the MTU
+		size = e.cfg.MTU + 512
+		if size < 2048 {
+			size = 2048
+		}
+	}
+	for i := range bufs {
+		bufs[i] = make([]byte, size)
+	}
+	fails := 0
+	for {
+		n, err := bd.ReadPackets(bufs, sizes, 0)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if errors.Is(err, os.ErrClosed) || fails > 1000 {
+				return fmt.Errorf("engine: device read: %w", err)
+			}
+			fails++ // e.g. a malformed offload header: drop and go on
+			e.counters.Malformed.Add(1)
+			continue
+		}
+		fails = 0
+		for i := 0; i < n; i++ {
+			e.devicePacket(bufs[i][:sizes[i]])
+		}
+	}
+}
+
+func (e *Engine) readDeviceSingle(ctx context.Context) error {
 	buf := make([]byte, 65535)
 	for {
 		n, err := e.cfg.Device.Read(buf)
@@ -230,19 +299,22 @@ func (e *Engine) readDevice(ctx context.Context) error {
 			}
 			return fmt.Errorf("engine: device read: %w", err)
 		}
-		pkt := buf[:n]
-		if packet.Validate(pkt, 65535) != nil {
-			e.counters.Malformed.Add(1)
-			continue
-		}
-		_, dst := packet.Addrs(pkt)
-		p := e.route(dst)
-		if p == nil {
-			e.counters.NoRoute.Add(1)
-			continue
-		}
-		p.enqueue(append([]byte(nil), pkt...))
+		e.devicePacket(buf[:n])
 	}
+}
+
+func (e *Engine) devicePacket(pkt []byte) {
+	if packet.Validate(pkt, 65535) != nil {
+		e.counters.Malformed.Add(1)
+		return
+	}
+	_, dst := packet.Addrs(pkt)
+	p := e.route(dst)
+	if p == nil {
+		e.counters.NoRoute.Add(1)
+		return
+	}
+	p.enqueue(withHeadroom(pkt))
 }
 
 // route returns the peer whose allowed IPs contain dst (longest prefix wins).
@@ -309,9 +381,17 @@ type pump struct {
 }
 
 func startPump(conn carrier.Conn) *pump {
-	p := &pump{ch: make(chan []byte, 64), done: make(chan struct{}), conn: conn}
+	p := &pump{ch: make(chan []byte, 256), done: make(chan struct{}), conn: conn}
 	go func() {
 		defer close(p.ch)
+		if or, ok := conn.(carrier.OwnedReader); ok {
+			p.ownedLoop(or)
+			return
+		}
+		if br, ok := conn.(carrier.BatchReader); ok {
+			p.batchLoop(br)
+			return
+		}
 		buf := make([]byte, carrier.MaxMessage)
 		for {
 			n, err := conn.ReadMessage(buf)
@@ -322,17 +402,54 @@ func startPump(conn carrier.Conn) *pump {
 			if n == 0 {
 				continue
 			}
-			select {
-			case p.ch <- append([]byte(nil), buf[:n]...):
-			case <-p.done:
-				// Nobody will consume more messages (handshake rejected, link
-				// closed). Without this the goroutine and up to 64 buffered
-				// messages leaked whenever a peer kept sending.
+			if !p.push(append([]byte(nil), buf[:n]...)) {
 				return
 			}
 		}
 	}()
 	return p
+}
+
+func (p *pump) push(m []byte) bool {
+	select {
+	case p.ch <- m:
+		return true
+	case <-p.done:
+		// Nobody will consume more messages (handshake rejected, link
+		// closed). Without this the goroutine and up to 256 buffered
+		// messages leaked whenever a peer kept sending.
+		return false
+	}
+}
+
+func (p *pump) ownedLoop(or carrier.OwnedReader) {
+	alive := true
+	for alive {
+		err := or.ReadOwned(func(m []byte) {
+			if alive && len(m) > 0 {
+				alive = p.push(m)
+			}
+		})
+		if err != nil {
+			p.err = err
+			return
+		}
+	}
+}
+
+func (p *pump) batchLoop(br carrier.BatchReader) {
+	alive := true
+	for alive {
+		err := br.ReadMessages(func(m []byte) {
+			if alive && len(m) > 0 {
+				alive = p.push(append([]byte(nil), m...))
+			}
+		})
+		if err != nil {
+			p.err = err
+			return
+		}
+	}
 }
 
 // stop closes the connection and releases the reader goroutine.

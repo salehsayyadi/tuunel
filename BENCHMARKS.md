@@ -6,7 +6,29 @@ final build with Go 1.27.1. Two network namespaces are joined by a veth pair
 Internet-path numbers**, and run-to-run variation on this shared VM was large
 (up to ±30 %).
 
-## Final validation build (latest)
+## v0.9.8 data-path optimisation (single vCPU per node)
+
+Small servers (1 vCPU) were CPU-bound at a fraction of their link speed:
+every 1.3 KB packet cost a TUN read/write and a UDP send/receive system
+call plus a full kernel stack traversal. v0.9.8 adds TUN offloads
+(IFF_VNET_HDR: TSO super-segments in, GRO-coalesced writes out),
+sendmmsg/recvmmsg with UDP GSO/GRO, in-place encryption and fewer copies.
+The wire format is unchanged (old and new nodes interoperate).
+
+Lab: two netns joined by veth, each daemon *and* its iperf3 pinned to one
+CPU (`taskset`), UDP carrier, 6 s iperf3 single stream:
+
+| Build | edge → remote | remote → edge | CPU edge+remote (s per 6 s, up) |
+|---|---|---|---|
+| v0.9.7 | 307 Mbit/s | 415 Mbit/s | 3.25 + 2.98 |
+| v0.9.8 | 668–746 Mbit/s | 885–934 Mbit/s | 2.4 + 2.8 |
+
+That is roughly 2.5–3× less CPU per byte. The licensed configuration
+(udp+tcp+wss+icmp carriers, GRE endpoint first) measured the same as a
+plain UDP configuration. Set `TUUNEL_TUN_OFFLOAD=0` / `TUUNEL_UDP_OFFLOAD=0`
+to disable the offloads for troubleshooting.
+
+## Final validation build
 
 `sudo tests/lab/netns-bench.sh BIN 100`, final validation build, same VM:
 

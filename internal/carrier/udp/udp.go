@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -50,7 +51,8 @@ func mapWriteErr(err error) error {
 }
 
 type clientConn struct {
-	c *net.UDPConn
+	c   *net.UDPConn
+	bio *batchIO
 }
 
 func (c *Carrier) Dial(ctx context.Context, address string) (carrier.Conn, error) {
@@ -63,20 +65,34 @@ func (c *Carrier) Dial(ctx context.Context, address string) (carrier.Conn, error
 	setDF(uc)
 	_ = uc.SetReadBuffer(4 << 20)
 	_ = uc.SetWriteBuffer(4 << 20)
-	return &clientConn{c: uc}, nil
+	return &clientConn{c: uc, bio: newBatchIO(uc)}, nil
 }
 
 func (c *clientConn) ReadMessage(b []byte) (int, error) {
-	for {
-		n, err := c.c.Read(b)
-		if err != nil {
-			// ECONNREFUSED from ICMP port-unreachable is reported, not hidden.
+	var n int
+	var tooBig bool
+	for n == 0 && !tooBig {
+		if _, err := c.bio.read(1, func(p []byte, _ net.Addr) bool {
+			if len(p) > len(b) {
+				tooBig = true
+				return true
+			}
+			n = copy(b, p)
+			return true
+		}); err != nil {
 			return 0, err
 		}
-		if n > 0 {
-			return n, nil
-		}
 	}
+	if tooBig {
+		return 0, carrier.ErrMessageTooLarge
+	}
+	return n, nil
+}
+
+// ReadMessages implements carrier.BatchReader.
+func (c *clientConn) ReadMessages(fn func(msg []byte)) error {
+	_, err := c.bio.read(256, func(p []byte, _ net.Addr) bool { fn(p); return true })
+	return err
 }
 
 func (c *clientConn) WriteMessage(b []byte) error {
@@ -87,19 +103,28 @@ func (c *clientConn) WriteMessage(b []byte) error {
 	return mapWriteErr(err)
 }
 
+// WriteMessages implements carrier.BatchWriter (sendmmsg + UDP GSO).
+func (c *clientConn) WriteMessages(msgs [][]byte) (int, error) {
+	n, err := c.bio.write(msgs, nil)
+	return n, mapWriteErr(err)
+}
+
 func (c *clientConn) Close() error         { return c.c.Close() }
 func (c *clientConn) LocalAddr() net.Addr  { return c.c.LocalAddr() }
 func (c *clientConn) RemoteAddr() net.Addr { return c.c.RemoteAddr() }
 
 type listener struct {
 	pc    *net.UDPConn
+	bio   *batchIO
 	q     *carrier.AcceptQueue
 	limit *carrier.Limiter
 	max   int
 	mu    sync.Mutex
 	conns map[string]*serverConn
 	done  chan struct{}
-	once  sync.Once
+	// lastSC caches the connection of the previous datagram (readLoop only)
+	lastSC *serverConn
+	once   sync.Once
 }
 
 func (c *Carrier) Listen(ctx context.Context, address string) (carrier.Listener, error) {
@@ -116,7 +141,7 @@ func (c *Carrier) Listen(ctx context.Context, address string) (carrier.Listener,
 	if max <= 0 {
 		max = 1024
 	}
-	l := &listener{pc: uc, q: carrier.NewAcceptQueue(64), limit: carrier.NewLimiter(10, 20), max: max,
+	l := &listener{pc: uc, bio: newBatchIO(uc), q: carrier.NewAcceptQueue(64), limit: carrier.NewLimiter(10, 20), max: max,
 		conns: make(map[string]*serverConn), done: make(chan struct{})}
 	go l.readLoop()
 	go l.reaper()
@@ -124,9 +149,14 @@ func (c *Carrier) Listen(ctx context.Context, address string) (carrier.Listener,
 }
 
 func (l *listener) readLoop() {
-	buf := make([]byte, 65535)
 	for {
-		n, addr, err := l.pc.ReadFromUDP(buf)
+		_, err := l.bio.read(1<<30, func(p []byte, a net.Addr) bool {
+			addr, ok := a.(*net.UDPAddr)
+			if ok && len(p) > 0 {
+				l.dispatch(p, addr)
+			}
+			return true
+		})
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				l.Close()
@@ -134,31 +164,46 @@ func (l *listener) readLoop() {
 			}
 			continue
 		}
-		if n == 0 {
-			continue
-		}
-		key := addr.String()
-		l.mu.Lock()
-		sc := l.conns[key]
-		if sc == nil {
-			if len(l.conns) >= l.max || !l.limit.Allow(addr, time.Now()) {
-				l.mu.Unlock()
-				continue
-			}
-			sc = &serverConn{l: l, addr: addr, in: make(chan []byte, 256), done: make(chan struct{})}
-			if !l.q.Push(sc) {
-				l.mu.Unlock()
-				continue
-			}
-			l.conns[key] = sc
-		}
-		sc.last = time.Now()
-		l.mu.Unlock()
-		msg := append([]byte(nil), buf[:n]...)
+	}
+}
+
+func (l *listener) dispatch(p []byte, addr *net.UDPAddr) {
+	if sc := l.lastSC; sc != nil && sc.addr.Port == addr.Port && sc.addr.IP.Equal(addr.IP) {
 		select {
-		case sc.in <- msg:
-		default: // receiver is slow: drop like a congested router would
+		case <-sc.done:
+		default: // fast path: same sender as the previous datagram
+			if now := time.Now().UnixNano(); now-sc.last.Load() > int64(time.Second) {
+				sc.last.Store(now)
+			}
+			select {
+			case sc.in <- append([]byte(nil), p...):
+			default:
+			}
+			return
 		}
+	}
+	key := addr.String()
+	l.mu.Lock()
+	sc := l.conns[key]
+	if sc == nil {
+		if len(l.conns) >= l.max || !l.limit.Allow(addr, time.Now()) {
+			l.mu.Unlock()
+			return
+		}
+		sc = &serverConn{l: l, addr: addr, in: make(chan []byte, 256), done: make(chan struct{})}
+		if !l.q.Push(sc) {
+			l.mu.Unlock()
+			return
+		}
+		l.conns[key] = sc
+	}
+	sc.last.Store(time.Now().UnixNano())
+	l.mu.Unlock()
+	l.lastSC = sc
+	msg := append([]byte(nil), p...)
+	select {
+	case sc.in <- msg:
+	default: // receiver is slow: drop like a congested router would
 	}
 }
 
@@ -172,7 +217,7 @@ func (l *listener) reaper() {
 		case now := <-t.C:
 			l.mu.Lock()
 			for k, sc := range l.conns {
-				if now.Sub(sc.last) > IdleTimeout {
+				if now.Sub(time.Unix(0, sc.last.Load())) > IdleTimeout {
 					delete(l.conns, k)
 					sc.closeLocked()
 				}
@@ -207,7 +252,7 @@ type serverConn struct {
 	in   chan []byte
 	done chan struct{}
 	once sync.Once
-	last time.Time // guarded by l.mu
+	last atomic.Int64 // unix nanoseconds of the last datagram
 }
 
 func (s *serverConn) closeLocked() { s.once.Do(func() { close(s.done) }) }
@@ -235,6 +280,40 @@ func (s *serverConn) WriteMessage(b []byte) error {
 	}
 	_, err := s.l.pc.WriteToUDP(b, s.addr)
 	return mapWriteErr(err)
+}
+
+// WriteMessages implements carrier.BatchWriter (sendmmsg + UDP GSO).
+func (s *serverConn) WriteMessages(msgs [][]byte) (int, error) {
+	select {
+	case <-s.done:
+		return 0, net.ErrClosed
+	default:
+	}
+	n, err := s.l.bio.write(msgs, s.addr)
+	return n, mapWriteErr(err)
+}
+
+// ReadMessages implements carrier.BatchReader: it waits for one message and
+// returns it together with whatever else is already queued.
+func (s *serverConn) ReadMessages(fn func(msg []byte)) error { return s.ReadOwned(fn) }
+
+// ReadOwned is ReadMessages where fn may keep msg (it is not reused).
+func (s *serverConn) ReadOwned(fn func(msg []byte)) error {
+	select {
+	case m := <-s.in:
+		fn(m)
+	case <-s.done:
+		return net.ErrClosed
+	}
+	for i := 0; i < 255; i++ {
+		select {
+		case m := <-s.in:
+			fn(m)
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 func (s *serverConn) Close() error {

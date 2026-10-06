@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -36,6 +37,11 @@ func NewLogger(c config.Log) *slog.Logger {
 
 // Run starts the daemon and blocks until SIGINT/SIGTERM.
 func Run(configPath string) error {
+	if os.Getenv("GOGC") == "" {
+		// The data path allocates one short-lived buffer per packet; a less
+		// eager collector trades a few MB of memory for noticeably less CPU.
+		debug.SetGCPercent(400)
+	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -80,6 +86,7 @@ func Run(configPath string) error {
 		return err
 	}
 	defer dev.Close()
+	log.Info("tun device opened", "name", dev.Name(), "offload", dev.Offload(), "batch", dev.BatchSize())
 	var nc *netcfg.Configurator
 	var applied []string
 	if *cfg.Interface.Manage {

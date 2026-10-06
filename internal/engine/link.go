@@ -40,6 +40,13 @@ type link struct {
 	pending []*session.Initiation
 	rekeyAt time.Time
 
+	// data path state, owned by the peer's sender (tx) / readLoop (rx)
+	txMsgs  [][]byte
+	txLens  []int
+	rxDev   BatchDevice
+	rxSlots [][]byte
+	rxBufs  [][]byte
+
 	tracker     *health.Tracker
 	established time.Time
 	lastRecv    atomic.Int64
@@ -78,6 +85,9 @@ func newLink(e *Engine, p *peer, conn carrier.Conn, pm *pump, c carrier.Carrier,
 		tracker: health.NewTracker(e.cfg.Health), established: time.Now(),
 		confirmed: make(chan struct{}), closed: make(chan struct{})}
 	l.lastRecv.Store(time.Now().UnixNano())
+	if bd, ok := e.cfg.Device.(BatchDevice); ok {
+		l.rxDev = bd
+	}
 	return l
 }
 
@@ -152,11 +162,13 @@ func (l *link) sendPing(pad int) error {
 
 func (l *link) readLoop(ctx context.Context) {
 	defer l.e.wg.Done()
+	defer l.flushRx()
 	for {
 		var msg []byte
 		select {
 		case m, ok := <-l.pm.ch:
 			if !ok {
+				l.flushRx()
 				reason := "carrier closed"
 				if l.pm.err != nil {
 					reason = "carrier error: " + l.pm.err.Error()
@@ -172,7 +184,116 @@ func (l *link) readLoop(ctx context.Context) {
 			return
 		}
 		l.handle(msg)
+		// Handle whatever else is already queued, then write the decrypted
+		// packets to the device in one batch (lets the TUN coalesce them).
+	drain:
+		for len(l.rxBufs) < rxBatch {
+			select {
+			case m, ok := <-l.pm.ch:
+				if !ok {
+					break drain
+				}
+				l.handle(m)
+			default:
+				break drain
+			}
+		}
+		l.flushRx()
 	}
+}
+
+// deliver hands a decrypted inner packet to the local device.
+func (l *link) deliver(body []byte) {
+	if l.rxDev == nil {
+		_, _ = l.e.cfg.Device.Write(body)
+		return
+	}
+	i := len(l.rxBufs)
+	if i == len(l.rxSlots) {
+		l.rxSlots = append(l.rxSlots, make([]byte, deviceHeadroom+65535))
+	}
+	slot := l.rxSlots[i][:deviceHeadroom+len(body)]
+	copy(slot[deviceHeadroom:], body)
+	l.rxBufs = append(l.rxBufs, slot)
+	if len(l.rxBufs) >= rxBatch {
+		l.flushRx()
+	}
+}
+
+func (l *link) flushRx() {
+	if len(l.rxBufs) == 0 {
+		return
+	}
+	_, _ = l.rxDev.WritePackets(l.rxBufs, deviceHeadroom)
+	l.rxBufs = l.rxBufs[:0]
+}
+
+// sendPackets seals and transmits queued inner packets (prepared by
+// withHeadroom) and returns how many packets and inner bytes were sent.
+func (l *link) sendPackets(pkts [][]byte) (sent, bytes int) {
+	l.mu.Lock()
+	s := l.cur
+	l.mu.Unlock()
+	if s == nil {
+		return 0, 0
+	}
+	bw, batch := l.conn.(carrier.BatchWriter)
+	fw, flowW := l.conn.(carrier.FlowWriter)
+	msgs, lens := l.txMsgs[:0], l.txLens[:0]
+	flush := func() {
+		if len(msgs) == 0 {
+			return
+		}
+		n, _ := bw.WriteMessages(msgs)
+		for i := 0; i < n && i < len(lens); i++ {
+			bytes += lens[i]
+		}
+		sent += n
+		msgs, lens = msgs[:0], lens[:0]
+	}
+	for _, pkt := range pkts {
+		body := pkt[session.SealHeadroom:]
+		if len(body) > l.limit {
+			if batch {
+				flush()
+			}
+			if l.sendIP(body) == nil {
+				sent++
+				bytes += len(body)
+			}
+			continue
+		}
+		var flow uint32
+		if flowW && !batch {
+			flow = packet.FlowHash(body)
+		}
+		n := len(body)
+		msg, err := s.SealInPlace(pkt, session.InnerIP)
+		if err != nil {
+			continue
+		}
+		if batch {
+			msgs, lens = append(msgs, msg), append(lens, n)
+			if len(msgs) >= txBatch {
+				flush()
+			}
+			continue
+		}
+		if flowW {
+			err = fw.WriteMessageFlow(msg, flow)
+		} else {
+			err = l.conn.WriteMessage(msg)
+		}
+		if err == nil {
+			sent++
+			bytes += n
+		}
+	}
+	if batch {
+		flush()
+	}
+	l.txMsgs, l.txLens = msgs[:0], lens[:0]
+	return sent, bytes
 }
 
 func (l *link) handle(msg []byte) {
@@ -248,7 +369,7 @@ func (l *link) handleData(msg []byte) {
 		}
 		l.peer.stats.rxPackets.Add(1)
 		l.peer.stats.rxBytes.Add(uint64(len(body)))
-		_, _ = l.e.cfg.Device.Write(body)
+		l.deliver(body)
 	case session.InnerPing:
 		if len(body) < 8 || len(body) > maxPingBody {
 			return

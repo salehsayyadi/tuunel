@@ -85,8 +85,31 @@ func (s *Session) Seal(dst []byte, inner byte, body []byte) ([]byte, error) {
 	return s.send.Encrypt(dst, n, hdr[:], pt), nil
 }
 
+// SealHeadroom is the space SealInPlace needs in front of the body.
+const SealHeadroom = DataHeaderLen + 1
+
+// SealInPlace encrypts buf[SealHeadroom:] (an inner payload of type inner)
+// in place, writing the data header into buf[:SealHeadroom]. With
+// cap(buf) >= len(buf)+16 no allocation or copy takes place. The returned
+// message aliases buf.
+func (s *Session) SealInPlace(buf []byte, inner byte) ([]byte, error) {
+	if len(buf) < SealHeadroom {
+		return nil, ErrMalformed
+	}
+	n := s.counter.Add(1) - 1
+	if n >= RejectAfterMessages {
+		return nil, ErrExhausted
+	}
+	buf[0] = TypeData
+	binary.BigEndian.PutUint32(buf[1:5], s.RemoteIndex)
+	binary.BigEndian.PutUint64(buf[5:13], n)
+	buf[13] = inner
+	return s.send.Encrypt(buf[:DataHeaderLen], n, buf[:DataHeaderLen], buf[DataHeaderLen:]), nil
+}
+
 // Open authenticates and decrypts a data message, enforcing replay protection.
-// The returned body aliases a freshly allocated buffer.
+// Decryption happens in place: msg is overwritten and the returned body
+// aliases msg[SealHeadroom:].
 func (s *Session) Open(msg []byte) (byte, []byte, error) {
 	if len(msg) < DataHeaderLen+1+16 || msg[0] != TypeData {
 		return 0, nil, ErrMalformed
@@ -104,7 +127,7 @@ func (s *Session) Open(msg []byte) (byte, []byte, error) {
 	if !ok {
 		return 0, nil, ErrReplay
 	}
-	pt, err := s.recv.Decrypt(nil, n, msg[:DataHeaderLen], msg[DataHeaderLen:])
+	pt, err := s.recv.Decrypt(msg[DataHeaderLen:DataHeaderLen], n, msg[:DataHeaderLen], msg[DataHeaderLen:])
 	if err != nil {
 		return 0, nil, ErrAuth
 	}

@@ -69,22 +69,31 @@ func (p *peer) activeLink() *link {
 
 func (p *peer) sender(ctx context.Context) {
 	defer p.e.wg.Done()
+	batch := make([][]byte, 0, txBatch)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case pkt := <-p.queue:
+			batch = append(batch[:0], pkt)
+		drain:
+			for len(batch) < txBatch {
+				select {
+				case q := <-p.queue:
+					batch = append(batch, q)
+				default:
+					break drain
+				}
+			}
 			l := p.activeLink()
 			if l == nil {
-				p.stats.drops.Add(1)
+				p.stats.drops.Add(uint64(len(batch)))
 				continue
 			}
-			if err := l.sendIP(pkt); err != nil {
-				p.stats.drops.Add(1)
-				continue
-			}
-			p.stats.txPackets.Add(1)
-			p.stats.txBytes.Add(uint64(len(pkt)))
+			n, bytes := l.sendPackets(batch)
+			p.stats.drops.Add(uint64(len(batch) - n))
+			p.stats.txPackets.Add(uint64(n))
+			p.stats.txBytes.Add(uint64(bytes))
 		}
 	}
 }

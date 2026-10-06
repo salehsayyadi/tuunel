@@ -60,6 +60,27 @@ type FlowWriter interface {
 	WriteMessageFlow(b []byte, flow uint32) error
 }
 
+// BatchWriter is implemented by connections that can send several messages
+// with one system call (UDP: sendmmsg, with UDP GSO when available). It
+// returns the number of messages sent. The engine only uses it for data.
+type BatchWriter interface {
+	WriteMessages(msgs [][]byte) (int, error)
+}
+
+// BatchReader is implemented by connections that can receive several
+// messages with one system call. ReadMessages blocks until at least one
+// message is available and calls fn for each received message; fn must not
+// retain msg after it returns.
+type BatchReader interface {
+	ReadMessages(fn func(msg []byte)) error
+}
+
+// OwnedReader is a BatchReader whose messages are freshly allocated: fn may
+// retain them, which saves a copy.
+type OwnedReader interface {
+	ReadOwned(fn func(msg []byte)) error
+}
+
 // ErrBusy reports a data message dropped because the send queue is full.
 var ErrBusy = errors.New("carrier: send queue full")
 
